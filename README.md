@@ -2,31 +2,73 @@
 
 Control plane for mamotama-edge.
 
-mamotama-center provides centralized management,
-rule distribution, and log collection for mamotama-edge devices.
+`mamotama-center` is a single-binary service for:
+- edge device enrollment
+- heartbeat verification
+- persistent device registry management
 
-## Architecture
+## Current Scope (0.1.x)
 
-IoT Device
-   |
-   v
-mamotama-edge (WAF / Gateway)
-   |
-   v
-mamotama-center (Control Plane)
+- `POST /v1/enroll`
+  - header `X-License-Key` required
+  - registers `device_id` + edge public key
+- `POST /v1/heartbeat`
+  - verifies Ed25519 signature using enrolled public key
+  - applies timestamp skew and replay checks
+- `GET /healthz`
+- file-backed registry (`storage.path`) with atomic write
 
-## Planned Features
+## Quick Start
 
-- Edge device registration
-- Security rule distribution
-- Attack log collection
-- Device management dashboard
+1. Copy config:
 
-## Status
+```bash
+cp center.config.example.json center.config.json
+```
 
-Work in progress.
+2. Edit `center.config.json`:
+- set `auth.enrollment_license_keys` (16+ chars, one or more keys)
+- set `storage.path` (persistent file path)
+- optional: tune `heartbeat.max_clock_skew`
+
+3. Build and run:
+
+```bash
+make build
+make run CONFIG=./center.config.json
+```
+
+Validation only:
+
+```bash
+make config-check CONFIG=./center.config.json
+```
+
+## Heartbeat Signature Format
+
+Edge signs this message with its private key:
+
+```text
+device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
+```
+
+`signature_b64` is Base64(Ed25519 signature bytes).
+
+## Build Targets
+
+- `make build`
+- `make run`
+- `make config-check`
+- `make check`
+
+## Next Planned Features
+
+- rule distribution API
+- policy/version rollout control
+- log ingest pipeline
+- device management dashboard
 
 ## Related Project
 
-mamotama-edge  
+`mamotama-edge`  
 https://github.com/vril-dev/mamotama-edge

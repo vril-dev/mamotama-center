@@ -1,0 +1,21 @@
+{
+  "server": {
+    "listen_address": ":18081",
+    "read_header_timeout": "3s",
+    "read_timeout": "10s",
+    "write_timeout": "15s",
+    "idle_timeout": "60s",
+    "shutdown_timeout": "10s"
+  },
+  "auth": {
+    "enrollment_license_keys": [
+      "replace-with-strong-license-key-001"
+    ]
+  },
+  "storage": {
+    "path": "./center-data/devices.json"
+  },
+  "heartbeat": {
+    "max_clock_skew": "5m"
+  }
+}
