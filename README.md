@@ -90,6 +90,7 @@ Control plane for mamotama-edge.
   - supports JSON export/import for per-device `Policy Active Base` map
   - supports profile-based base-map switching (e.g., staging vs production)
   - shows profile-to-profile base-map diffs by device key
+  - profile diff view supports filters: all, changed-only, missing-in-current, missing-in-compare
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 

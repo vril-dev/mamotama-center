@@ -189,6 +189,15 @@ const adminDevicesPageHTML = `<!doctype html>
           <select id="rfProfileCompare" style="min-width:180px;"></select>
           <div class="muted">Compares active-base map entries against current profile.</div>
         </div>
+        <div style="min-width:260px; flex:1;">
+          <label>Profile Diff Filter</label>
+          <select id="rfProfileDiffFilter" style="min-width:180px;">
+            <option value="all">all differences</option>
+            <option value="changed">only changed values</option>
+            <option value="missing_current">missing in current</option>
+            <option value="missing_compare">missing in compare</option>
+          </select>
+        </div>
       </div>
       <div style="margin-top:8px;">
         <label>Profile Map Diff</label>
@@ -377,6 +386,7 @@ const adminDevicesPageHTML = `<!doctype html>
 
     function renderProfileMapDiff() {
       const compareProfile = String(byId("rfProfileCompare").value || "").trim();
+      const diffFilter = String(byId("rfProfileDiffFilter").value || "all").trim();
       const currentMap = sanitizeActiveBaseMap(activeBaseProfiles[currentBaseProfile] || {});
       const compareMap = compareProfile ? sanitizeActiveBaseMap(activeBaseProfiles[compareProfile] || {}) : {};
 
@@ -388,23 +398,40 @@ const adminDevicesPageHTML = `<!doctype html>
       const lines = [];
       lines.push("[profile map diff]");
       lines.push("current=" + currentBaseProfile + " compare=" + compareProfile);
+      lines.push("filter=" + diffFilter);
       lines.push("");
-      let changed = 0;
+      let shown = 0;
+      let missingCurrent = 0;
+      let missingCompare = 0;
+      let valueChanged = 0;
+      let totalDiff = 0;
       for (const key of keys) {
         const currentVal = String(currentMap[key] || "");
         const compareVal = String(compareMap[key] || "");
         if (currentVal === compareVal) continue;
-        changed++;
+        totalDiff++;
+        const currentMissing = currentVal === "";
+        const compareMissing = compareVal === "";
+        if (currentMissing) missingCurrent++;
+        if (compareMissing) missingCompare++;
+        if (!currentMissing && !compareMissing) valueChanged++;
+
+        if (diffFilter === "changed" && (currentMissing || compareMissing)) continue;
+        if (diffFilter === "missing_current" && !currentMissing) continue;
+        if (diffFilter === "missing_compare" && !compareMissing) continue;
+
+        shown++;
         lines.push(key);
         lines.push("  current: " + (currentVal || "(none)"));
         lines.push("  compare: " + (compareVal || "(none)"));
       }
-      if (changed === 0) {
-        lines.push("(no differences)");
+      if (shown === 0) {
+        lines.push("(no entries matched filter)");
       } else {
         lines.push("");
-        lines.push("changed_entries=" + changed);
+        lines.push("shown_entries=" + shown);
       }
+      lines.push("summary: total_diff=" + totalDiff + ", value_changed=" + valueChanged + ", missing_current=" + missingCurrent + ", missing_compare=" + missingCompare);
       byId("rfProfileDiffSummary").textContent = lines.join("\n");
     }
 
@@ -787,6 +814,12 @@ const adminDevicesPageHTML = `<!doctype html>
       } catch (e) { setErr(String(e.message || e)); }
     };
     byId("rfProfileCompare").onchange = () => {
+      try {
+        setErr(""); setOk("");
+        renderProfileMapDiff();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+    byId("rfProfileDiffFilter").onchange = () => {
       try {
         setErr(""); setOk("");
         renderProfileMapDiff();
