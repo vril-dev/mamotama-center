@@ -89,6 +89,7 @@ Control plane for mamotama-edge.
   - `Policy Active Base` preview path is saved per device in browser localStorage
   - supports JSON export/import for per-device `Policy Active Base` map
   - supports profile-based base-map switching (e.g., staging vs production)
+  - shows profile-to-profile base-map diffs by device key
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 

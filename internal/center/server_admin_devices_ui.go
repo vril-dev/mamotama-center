@@ -183,6 +183,17 @@ const adminDevicesPageHTML = `<!doctype html>
           <input id="rfImportFile" type="file" accept="application/json,.json" style="display:none;">
         </div>
       </div>
+      <div class="row">
+        <div style="min-width:360px; flex:1;">
+          <label>Profile Diff Compare</label>
+          <select id="rfProfileCompare" style="min-width:180px;"></select>
+          <div class="muted">Compares active-base map entries against current profile.</div>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Profile Map Diff</label>
+        <pre id="rfProfileDiffSummary" class="box"></pre>
+      </div>
       <div class="grid">
         <div>
           <label>Current rule_files</label>
@@ -330,9 +341,9 @@ const adminDevicesPageHTML = `<!doctype html>
     }
 
     function renderProfileControls() {
+      const names = Object.keys(activeBaseProfiles).sort();
       const sel = byId("rfProfileSelect");
       sel.innerHTML = "";
-      const names = Object.keys(activeBaseProfiles).sort();
       for (const name of names) {
         const opt = document.createElement("option");
         opt.value = name;
@@ -341,6 +352,60 @@ const adminDevicesPageHTML = `<!doctype html>
         sel.appendChild(opt);
       }
       byId("rfProfileName").value = currentBaseProfile;
+
+      const compareSel = byId("rfProfileCompare");
+      const prevCompare = String(compareSel.value || "").trim();
+      compareSel.innerHTML = "";
+      const noneOpt = document.createElement("option");
+      noneOpt.value = "";
+      noneOpt.textContent = "(none)";
+      compareSel.appendChild(noneOpt);
+      for (const name of names) {
+        if (name === currentBaseProfile) continue;
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        compareSel.appendChild(opt);
+      }
+      let nextCompare = prevCompare;
+      if (!nextCompare || nextCompare === currentBaseProfile || !activeBaseProfiles[nextCompare]) {
+        nextCompare = names.find((v) => v !== currentBaseProfile) || "";
+      }
+      compareSel.value = nextCompare;
+      renderProfileMapDiff();
+    }
+
+    function renderProfileMapDiff() {
+      const compareProfile = String(byId("rfProfileCompare").value || "").trim();
+      const currentMap = sanitizeActiveBaseMap(activeBaseProfiles[currentBaseProfile] || {});
+      const compareMap = compareProfile ? sanitizeActiveBaseMap(activeBaseProfiles[compareProfile] || {}) : {};
+
+      if (!compareProfile) {
+        byId("rfProfileDiffSummary").textContent = "select compare profile";
+        return;
+      }
+      const keys = Array.from(new Set([...Object.keys(currentMap), ...Object.keys(compareMap)])).sort();
+      const lines = [];
+      lines.push("[profile map diff]");
+      lines.push("current=" + currentBaseProfile + " compare=" + compareProfile);
+      lines.push("");
+      let changed = 0;
+      for (const key of keys) {
+        const currentVal = String(currentMap[key] || "");
+        const compareVal = String(compareMap[key] || "");
+        if (currentVal === compareVal) continue;
+        changed++;
+        lines.push(key);
+        lines.push("  current: " + (currentVal || "(none)"));
+        lines.push("  compare: " + (compareVal || "(none)"));
+      }
+      if (changed === 0) {
+        lines.push("(no differences)");
+      } else {
+        lines.push("");
+        lines.push("changed_entries=" + changed);
+      }
+      byId("rfProfileDiffSummary").textContent = lines.join("\n");
     }
 
     function switchActiveBaseProfile(name) {
@@ -721,6 +786,12 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("switched profile: " + currentBaseProfile);
       } catch (e) { setErr(String(e.message || e)); }
     };
+    byId("rfProfileCompare").onchange = () => {
+      try {
+        setErr(""); setOk("");
+        renderProfileMapDiff();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
     byId("rfProfileSave").onclick = () => {
       try {
         setErr(""); setOk("");
@@ -895,6 +966,7 @@ const adminDevicesPageHTML = `<!doctype html>
     byId("rfActiveBase").oninput = () => {
       saveActiveBaseForSelection();
       renderRuleFilesDiff();
+      renderProfileMapDiff();
     };
 
     refreshAll().catch(e => setErr(String(e.message || e)));
