@@ -4,6 +4,7 @@ import "net/http"
 
 type Handlers struct {
 	Policies    http.HandlerFunc
+	PolicyTools http.HandlerFunc
 	PolicyByID  http.HandlerFunc
 	Devices     http.HandlerFunc
 	DeviceByID  http.HandlerFunc
@@ -21,6 +22,9 @@ func Register(mux *http.ServeMux, h Handlers) {
 	}
 	if h.Policies != nil {
 		mux.HandleFunc("/v1/policies", h.Policies)
+	}
+	if h.PolicyTools != nil {
+		mux.HandleFunc("/v1/policies:inspect-bundle", h.PolicyTools)
 	}
 	if h.PolicyByID != nil {
 		mux.HandleFunc("/v1/policies/", h.PolicyByID)

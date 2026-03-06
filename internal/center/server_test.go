@@ -1144,6 +1144,106 @@ func TestPolicyUpsertRejectsRawAndTemplateTogether(t *testing.T) {
 	}
 }
 
+func TestPolicyUpsertTemplateWithSelectedRuleFiles(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
+		"rules/a.conf": "SecRuleEngine On\n",
+		"rules/b.conf": "SecRule ARGS:test \"@contains bad\" \"id:1001,phase:2,deny\"\n",
+	})
+	reqBody, err := json.Marshal(map[string]any{
+		"version":          "waf-template-select-v1",
+		"waf_raw_template": "bundle_default",
+		"waf_rule_files":   []string{"rules/b.conf", "rules/a.conf"},
+		"bundle_tgz_b64":   bundleB64,
+		"bundle_sha256":    bundleSHA,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewReader(reqBody))
+	addAdminAPIKey(req)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("policy upsert with selected template files failed: %d body=%s", res.Code, res.Body.String())
+	}
+
+	var body struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	var waf struct {
+		RuleFiles []string `json:"rule_files"`
+	}
+	if err := json.Unmarshal([]byte(body.Policy.WAFRaw), &waf); err != nil {
+		t.Fatalf("decode generated waf_raw: %v", err)
+	}
+	if len(waf.RuleFiles) != 2 {
+		t.Fatalf("unexpected generated rule files: %#v", waf.RuleFiles)
+	}
+	if waf.RuleFiles[0] != "${MAMOTAMA_POLICY_ACTIVE}/rules/b.conf" || waf.RuleFiles[1] != "${MAMOTAMA_POLICY_ACTIVE}/rules/a.conf" {
+		t.Fatalf("unexpected selected order: %#v", waf.RuleFiles)
+	}
+}
+
+func TestInspectBundleEndpoint(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
+		"rules/mamotama.conf": "SecRuleEngine On\n",
+		"rules/z.conf":        "SecRule REQUEST_URI \"@contains x\" \"id:2001,phase:1,deny\"\n",
+		"README.txt":          "not-a-rule",
+	})
+	reqBody, err := json.Marshal(map[string]any{
+		"bundle_tgz_b64": bundleB64,
+		"bundle_sha256":  bundleSHA,
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/policies:inspect-bundle", bytes.NewReader(reqBody))
+	addAdminAPIKey(req)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("inspect bundle failed: %d body=%s", res.Code, res.Body.String())
+	}
+	var body struct {
+		Bundle struct {
+			SHA256               string   `json:"sha256"`
+			ConfFiles            []string `json:"conf_files"`
+			RecommendedRuleFiles []string `json:"recommended_rule_files"`
+		} `json:"bundle"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode inspect response: %v", err)
+	}
+	if body.Bundle.SHA256 != bundleSHA {
+		t.Fatalf("unexpected bundle sha: got=%s want=%s", body.Bundle.SHA256, bundleSHA)
+	}
+	if len(body.Bundle.ConfFiles) != 2 {
+		t.Fatalf("unexpected conf files: %#v", body.Bundle.ConfFiles)
+	}
+	if len(body.Bundle.RecommendedRuleFiles) != 1 || body.Bundle.RecommendedRuleFiles[0] != "rules/mamotama.conf" {
+		t.Fatalf("unexpected recommended files: %#v", body.Bundle.RecommendedRuleFiles)
+	}
+}
+
 func TestDevicePolicyDownload(t *testing.T) {
 	t.Parallel()
 

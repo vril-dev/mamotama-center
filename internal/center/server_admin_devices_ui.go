@@ -125,6 +125,12 @@ const adminDevicesPageHTML = `<!doctype html>
           </select>
         </div>
       </div>
+      <div class="row">
+        <div style="min-width:420px; flex:1;">
+          <label>Bundle .conf Files (for template)</label>
+          <select id="bundleRuleFiles" multiple size="6" style="width:100%;"></select>
+        </div>
+      </div>
       <div>
         <label>WAF Raw</label>
         <textarea id="wafRaw" placeholder='{"enabled":true,"rule_files":["${MAMOTAMA_POLICY_ACTIVE}/rules/mamotama.conf"]}'></textarea>
@@ -266,12 +272,29 @@ const adminDevicesPageHTML = `<!doctype html>
       if (raw && template) throw new Error("set either waf_raw or waf_raw_template, not both");
       const body = { version, note: byId("note").value.trim() };
       if (raw) body.waf_raw = raw;
-      if (template) body.waf_raw_template = template;
+      if (template) {
+        body.waf_raw_template = template;
+        const selected = Array.from(byId("bundleRuleFiles").selectedOptions || []).map(o => o.value).filter(Boolean);
+        if (selected.length > 0) body.waf_rule_files = selected;
+      }
       if (bundleB64 && bundleSHA) {
         body.bundle_tgz_b64 = bundleB64;
         body.bundle_sha256 = bundleSHA;
       }
       return body;
+    }
+
+    function renderBundleRuleFiles(files, recommended) {
+      const sel = byId("bundleRuleFiles");
+      sel.innerHTML = "";
+      const recommendSet = new Set((recommended || []).filter(Boolean));
+      for (const f of (files || [])) {
+        const opt = document.createElement("option");
+        opt.value = f;
+        opt.textContent = f;
+        if (recommendSet.has(f)) opt.selected = true;
+        sel.appendChild(opt);
+      }
     }
 
     function triggerDownload(url, fileName) {
@@ -300,6 +323,7 @@ const adminDevicesPageHTML = `<!doctype html>
         byId("wafRaw").value = p.waf_raw || "";
         byId("wafTemplate").value = "";
         byId("bundleSHA").value = p.bundle_sha256 || "";
+        renderBundleRuleFiles([], []);
         bundleB64 = "";
         bundleSHA = "";
         byId("bundleFile").value = "";
@@ -397,6 +421,7 @@ const adminDevicesPageHTML = `<!doctype html>
           bundleB64 = "";
           bundleSHA = "";
           byId("bundleSHA").value = "";
+          renderBundleRuleFiles([], []);
           return;
         }
         const buf = await f.arrayBuffer();
@@ -405,10 +430,13 @@ const adminDevicesPageHTML = `<!doctype html>
         bundleSHA = toHex(new Uint8Array(digest));
         bundleB64 = bytesToBase64(bytes);
         byId("bundleSHA").value = bundleSHA;
+        const inspect = await api("POST", "/v1/policies:inspect-bundle", { bundle_tgz_b64: bundleB64, bundle_sha256: bundleSHA });
+        const bundle = (inspect && inspect.bundle) || {};
+        renderBundleRuleFiles(bundle.conf_files || [], bundle.recommended_rule_files || []);
         if (!byId("wafRaw").value.trim() && !byId("wafTemplate").value) {
           byId("wafTemplate").value = "bundle_default";
         }
-        setOk("bundle loaded: " + f.name + " (" + bytes.length + " bytes)");
+        setOk("bundle loaded: " + f.name + " (" + bytes.length + " bytes, conf=" + ((bundle.conf_count|0)) + ")");
       } catch (e) { setErr(String(e.message || e)); }
     };
 

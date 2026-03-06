@@ -27,8 +27,11 @@ Control plane for mamotama-edge.
   - lists policy versions and desired/current usage summary
 - `POST /v1/policies`
   - header `X-API-Key` required
-  - upserts immutable policy version payload (`version`, `waf_raw` or `waf_raw_template`, optional `sha256`, `bundle_tgz_b64`, `bundle_sha256`, `note`) as `draft`
+  - upserts immutable policy version payload (`version`, `waf_raw` or `waf_raw_template`, optional `waf_rule_files`, `sha256`, `bundle_tgz_b64`, `bundle_sha256`, `note`) as `draft`
   - `waf_raw_template=bundle_default` generates `waf_raw` from bundle (`${MAMOTAMA_POLICY_ACTIVE}/...`)
+- `POST /v1/policies:inspect-bundle`
+  - header `X-API-Key` required
+  - parses bundle and returns `.conf` file list + recommended default for template use
 - `POST /v1/policies/{version}:approve`
   - header `X-API-Key` required
   - marks policy status as `approved` (required before assignment)

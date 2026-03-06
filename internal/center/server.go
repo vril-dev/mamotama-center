@@ -71,13 +71,19 @@ type heartbeatRequest struct {
 }
 
 type policyUpsertRequest struct {
-	Version        string `json:"version"`
-	SHA256         string `json:"sha256,omitempty"`
-	WAFRaw         string `json:"waf_raw,omitempty"`
-	WAFRawTemplate string `json:"waf_raw_template,omitempty"`
-	BundleTGZB64   string `json:"bundle_tgz_b64,omitempty"`
-	BundleSHA256   string `json:"bundle_sha256,omitempty"`
-	Note           string `json:"note,omitempty"`
+	Version        string   `json:"version"`
+	SHA256         string   `json:"sha256,omitempty"`
+	WAFRaw         string   `json:"waf_raw,omitempty"`
+	WAFRawTemplate string   `json:"waf_raw_template,omitempty"`
+	WAFRuleFiles   []string `json:"waf_rule_files,omitempty"`
+	BundleTGZB64   string   `json:"bundle_tgz_b64,omitempty"`
+	BundleSHA256   string   `json:"bundle_sha256,omitempty"`
+	Note           string   `json:"note,omitempty"`
+}
+
+type bundleInspectRequest struct {
+	BundleTGZB64 string `json:"bundle_tgz_b64"`
+	BundleSHA256 string `json:"bundle_sha256,omitempty"`
 }
 
 type policyAssignRequest struct {
@@ -170,6 +176,7 @@ func (s *Server) routes() {
 	})
 	adminroutes.Register(s.mux, adminroutes.Handlers{
 		Policies:    s.handlePolicies,
+		PolicyTools: s.handlePolicyTools,
 		PolicyByID:  s.handlePolicyByVersion,
 		Devices:     s.handleDevices,
 		DeviceByID:  s.handleDevice,
@@ -524,7 +531,7 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
 			return
 		}
-		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, req.BundleTGZB64)
+		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, req.WAFRuleFiles, req.BundleTGZB64, req.BundleSHA256)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -642,7 +649,13 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 				templateBundleB64 = existing.BundleTGZB64
 			}
 		}
-		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, templateBundleB64)
+		templateBundleSHA := req.BundleSHA256
+		if strings.TrimSpace(templateBundleSHA) == "" && strings.TrimSpace(req.WAFRawTemplate) != "" {
+			if existing, ok := s.store.getPolicy(version); ok {
+				templateBundleSHA = existing.BundleSHA256
+			}
+		}
+		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, req.WAFRuleFiles, templateBundleB64, templateBundleSHA)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -698,6 +711,39 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+func (s *Server) handlePolicyTools(w http.ResponseWriter, r *http.Request) {
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.requireAdminWrite(w, r) {
+		return
+	}
+
+	var req bundleInspectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	confFiles, recommended, bundleSHA, err := inspectBundle(req.BundleTGZB64, req.BundleSHA256)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "ok",
+		"bundle": map[string]any{
+			"sha256":                 bundleSHA,
+			"conf_files":             confFiles,
+			"conf_count":             len(confFiles),
+			"recommended_rule_files": recommended,
+		},
+	})
 }
 
 func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {
@@ -1571,7 +1617,7 @@ func parsePolicyVersionPath(path string) (version string, action string, ok bool
 	return version, "", true
 }
 
-func resolvePolicyWAFRaw(raw string, template string, bundleTGZB64 string) (string, error) {
+func resolvePolicyWAFRaw(raw string, template string, ruleFiles []string, bundleTGZB64 string, bundleSHA256 string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	template = strings.ToLower(strings.TrimSpace(template))
 	if raw != "" && template != "" {
@@ -1585,13 +1631,21 @@ func resolvePolicyWAFRaw(raw string, template string, bundleTGZB64 string) (stri
 	}
 	switch template {
 	case "bundle_default":
-		ruleFile, err := defaultBundleRuleFile(bundleTGZB64)
+		confFiles, _, _, err := inspectBundle(bundleTGZB64, bundleSHA256)
 		if err != nil {
 			return "", err
 		}
+		selected, err := selectTemplateRuleFiles(confFiles, ruleFiles)
+		if err != nil {
+			return "", err
+		}
+		prefixed := make([]string, 0, len(selected))
+		for _, f := range selected {
+			prefixed = append(prefixed, "${MAMOTAMA_POLICY_ACTIVE}/"+f)
+		}
 		out, err := json.Marshal(map[string]any{
 			"enabled":    true,
-			"rule_files": []string{"${MAMOTAMA_POLICY_ACTIVE}/" + ruleFile},
+			"rule_files": prefixed,
 		})
 		if err != nil {
 			return "", fmt.Errorf("marshal generated waf_raw: %w", err)
@@ -1602,22 +1656,61 @@ func resolvePolicyWAFRaw(raw string, template string, bundleTGZB64 string) (stri
 	}
 }
 
-func defaultBundleRuleFile(bundleTGZB64 string) (string, error) {
+func selectTemplateRuleFiles(bundleConfFiles []string, requested []string) ([]string, error) {
+	if len(bundleConfFiles) == 0 {
+		return nil, fmt.Errorf("bundle does not contain any .conf file")
+	}
+	available := make(map[string]struct{}, len(bundleConfFiles))
+	for _, v := range bundleConfFiles {
+		available[v] = struct{}{}
+	}
+	if len(requested) == 0 {
+		return []string{recommendedBundleRuleFile(bundleConfFiles)}, nil
+	}
+
+	out := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	for _, raw := range requested {
+		clean, ok := normalizeBundleEntryPath(raw)
+		if !ok || !strings.HasSuffix(strings.ToLower(clean), ".conf") {
+			return nil, fmt.Errorf("invalid waf_rule_files entry")
+		}
+		if _, ok := available[clean]; !ok {
+			return nil, fmt.Errorf("waf_rule_files entry is not present in bundle")
+		}
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		out = append(out, clean)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("waf_rule_files must include at least one .conf path")
+	}
+	return out, nil
+}
+
+func inspectBundle(bundleTGZB64 string, expectedSHA256 string) ([]string, []string, string, error) {
 	bundleTGZB64 = strings.TrimSpace(bundleTGZB64)
 	if bundleTGZB64 == "" {
-		return "", fmt.Errorf("bundle_tgz_b64 is required when waf_raw_template=bundle_default")
+		return nil, nil, "", fmt.Errorf("bundle_tgz_b64 is required")
 	}
 	raw, err := base64.StdEncoding.DecodeString(bundleTGZB64)
 	if err != nil {
-		return "", fmt.Errorf("decode bundle_tgz_b64: %w", err)
+		return nil, nil, "", fmt.Errorf("decode bundle_tgz_b64: %w", err)
 	}
 	if len(raw) == 0 {
-		return "", fmt.Errorf("decoded bundle is empty")
+		return nil, nil, "", fmt.Errorf("decoded bundle is empty")
+	}
+	sha := hashBytesHex(raw)
+	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
+	if expectedSHA256 != "" && sha != expectedSHA256 {
+		return nil, nil, "", fmt.Errorf("bundle_sha256 mismatch")
 	}
 
 	zr, err := gzip.NewReader(bytes.NewReader(raw))
 	if err != nil {
-		return "", fmt.Errorf("open bundle gzip: %w", err)
+		return nil, nil, "", fmt.Errorf("open bundle gzip: %w", err)
 	}
 	defer zr.Close()
 
@@ -1629,7 +1722,7 @@ func defaultBundleRuleFile(bundleTGZB64 string) (string, error) {
 			break
 		}
 		if err != nil {
-			return "", fmt.Errorf("read bundle tar: %w", err)
+			return nil, nil, "", fmt.Errorf("read bundle tar: %w", err)
 		}
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
 			continue
@@ -1643,15 +1736,23 @@ func defaultBundleRuleFile(bundleTGZB64 string) (string, error) {
 		}
 	}
 	if len(confFiles) == 0 {
-		return "", fmt.Errorf("bundle does not contain any .conf file")
+		return nil, nil, "", fmt.Errorf("bundle does not contain any .conf file")
 	}
 	sort.Strings(confFiles)
+	recommended := []string{recommendedBundleRuleFile(confFiles)}
+	return confFiles, recommended, sha, nil
+}
+
+func recommendedBundleRuleFile(confFiles []string) string {
 	for _, candidate := range confFiles {
 		if candidate == "rules/mamotama.conf" {
-			return candidate, nil
+			return candidate
 		}
 	}
-	return confFiles[0], nil
+	if len(confFiles) == 0 {
+		return ""
+	}
+	return confFiles[0]
 }
 
 func normalizeBundleEntryPath(raw string) (string, bool) {
