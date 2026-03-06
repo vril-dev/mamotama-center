@@ -26,6 +26,7 @@ type ServerConfig struct {
 
 type AuthConfig struct {
 	EnrollmentLicenseKeys []string `json:"enrollment_license_keys"`
+	AdminAPIKeys          []string `json:"admin_api_keys,omitempty"`
 	RequireTLS            bool     `json:"require_tls"`
 	TrustForwardedProto   bool     `json:"trust_forwarded_proto"`
 	NonceTTL              Duration `json:"nonce_ttl"`
@@ -55,6 +56,7 @@ func defaultConfig() Config {
 		},
 		Auth: AuthConfig{
 			EnrollmentLicenseKeys: nil,
+			AdminAPIKeys:          nil,
 			RequireTLS:            true,
 			TrustForwardedProto:   false,
 			NonceTTL:              Duration{Duration: 10 * time.Minute},
@@ -100,6 +102,9 @@ func normalize(cfg *Config) {
 	for i, key := range cfg.Auth.EnrollmentLicenseKeys {
 		cfg.Auth.EnrollmentLicenseKeys[i] = strings.TrimSpace(key)
 	}
+	for i, key := range cfg.Auth.AdminAPIKeys {
+		cfg.Auth.AdminAPIKeys[i] = strings.TrimSpace(key)
+	}
 }
 
 func validate(cfg Config) error {
@@ -118,6 +123,14 @@ func validate(cfg Config) error {
 		}
 		if len(key) < 16 {
 			return fmt.Errorf("auth.enrollment_license_keys contains a key shorter than 16 chars")
+		}
+	}
+	for _, key := range cfg.Auth.AdminAPIKeys {
+		if key == "" {
+			return fmt.Errorf("auth.admin_api_keys contains empty key")
+		}
+		if len(key) < 16 {
+			return fmt.Errorf("auth.admin_api_keys contains a key shorter than 16 chars")
 		}
 	}
 	if cfg.Auth.NonceTTL.Duration <= 0 {

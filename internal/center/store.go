@@ -1,11 +1,14 @@
 package center
 
 import (
+	"bufio"
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -68,6 +71,32 @@ type DeviceRecord struct {
 	LastLogUploadSHA256        string             `json:"last_log_upload_sha256,omitempty"`
 	RetiredAt                  string             `json:"retired_at,omitempty"`
 	RetireReason               string             `json:"retire_reason,omitempty"`
+}
+
+type LogDeviceRecord struct {
+	DeviceID             string `json:"device_id"`
+	BatchFiles           int    `json:"batch_files"`
+	LastLogUploadAt      string `json:"last_log_upload_at,omitempty"`
+	LastLogUploadEntries int    `json:"last_log_upload_entries,omitempty"`
+	LastLogUploadBytes   int64  `json:"last_log_upload_bytes,omitempty"`
+	LastLogUploadSHA256  string `json:"last_log_upload_sha256,omitempty"`
+}
+
+type LogQueryOptions struct {
+	From      time.Time
+	HasFrom   bool
+	To        time.Time
+	HasTo     bool
+	Before    time.Time
+	HasBefore bool
+	Kind      string
+	Level     string
+	Limit     int
+}
+
+type LogQueryResult struct {
+	Entries    []json.RawMessage `json:"entries"`
+	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
 type storedDevices struct {
@@ -447,6 +476,200 @@ func (s *deviceStore) saveLogBatch(deviceID string, messageAt time.Time, nonce s
 	return rec, outPath, nil
 }
 
+func (s *deviceStore) listLogDevices() ([]LogDeviceRecord, error) {
+	s.mu.RLock()
+	devices := make([]DeviceRecord, 0, len(s.devices))
+	for _, rec := range s.devices {
+		devices = append(devices, rec)
+	}
+	s.mu.RUnlock()
+
+	out := make([]LogDeviceRecord, 0, len(devices))
+	logsRoot := filepath.Join(filepath.Dir(s.path), "logs")
+
+	for _, rec := range devices {
+		safeID := safePathComponent(rec.DeviceID)
+		if safeID == "" {
+			continue
+		}
+		deviceDir := filepath.Join(logsRoot, safeID)
+		batchFiles := 0
+		entries, err := os.ReadDir(deviceDir)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("read log device dir: %w", err)
+		}
+		if err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() {
+					continue
+				}
+				if strings.HasSuffix(strings.ToLower(entry.Name()), ".ndjson.gz") {
+					batchFiles++
+				}
+			}
+		}
+		if batchFiles == 0 && strings.TrimSpace(rec.LastLogUploadAt) == "" {
+			continue
+		}
+		out = append(out, LogDeviceRecord{
+			DeviceID:             rec.DeviceID,
+			BatchFiles:           batchFiles,
+			LastLogUploadAt:      rec.LastLogUploadAt,
+			LastLogUploadEntries: rec.LastLogUploadEntries,
+			LastLogUploadBytes:   rec.LastLogUploadBytes,
+			LastLogUploadSHA256:  rec.LastLogUploadSHA256,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].DeviceID < out[j].DeviceID
+	})
+	return out, nil
+}
+
+func (s *deviceStore) queryLogs(deviceID string, opts LogQueryOptions) (LogQueryResult, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		return LogQueryResult{}, errStoreInvalid
+	}
+	if opts.Limit <= 0 {
+		opts.Limit = 100
+	}
+	if opts.Limit > 1000 {
+		opts.Limit = 1000
+	}
+	opts.Kind = strings.ToLower(strings.TrimSpace(opts.Kind))
+	opts.Level = strings.ToLower(strings.TrimSpace(opts.Level))
+
+	s.mu.RLock()
+	_, ok := s.devices[deviceID]
+	s.mu.RUnlock()
+	if !ok {
+		return LogQueryResult{}, os.ErrNotExist
+	}
+
+	logsRoot := filepath.Join(filepath.Dir(s.path), "logs")
+	deviceDir := filepath.Join(logsRoot, safePathComponent(deviceID))
+
+	dirEntries, err := os.ReadDir(deviceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return LogQueryResult{Entries: []json.RawMessage{}}, nil
+		}
+		return LogQueryResult{}, fmt.Errorf("read log dir: %w", err)
+	}
+	files := make([]string, 0, len(dirEntries))
+	for _, entry := range dirEntries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".ndjson.gz") {
+			files = append(files, filepath.Join(deviceDir, name))
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return filepath.Base(files[i]) > filepath.Base(files[j])
+	})
+
+	type parsedLogLine struct {
+		raw   json.RawMessage
+		ts    time.Time
+		hasTS bool
+		kind  string
+		level string
+	}
+
+	readBatch := func(path string) ([]parsedLogLine, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+
+		zr, err := gzip.NewReader(f)
+		if err != nil {
+			return nil, err
+		}
+		defer zr.Close()
+
+		sc := bufio.NewScanner(zr)
+		sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+		lines := make([]parsedLogLine, 0, 64)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" {
+				continue
+			}
+			raw := json.RawMessage(append([]byte(nil), []byte(line)...))
+			var meta struct {
+				Timestamp string `json:"timestamp"`
+				Kind      string `json:"kind"`
+				Level     string `json:"level"`
+			}
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				continue
+			}
+			ts, hasTS := parseStoreRFC3339Any(meta.Timestamp)
+			lines = append(lines, parsedLogLine{
+				raw:   raw,
+				ts:    ts,
+				hasTS: hasTS,
+				kind:  strings.ToLower(strings.TrimSpace(meta.Kind)),
+				level: strings.ToLower(strings.TrimSpace(meta.Level)),
+			})
+		}
+		if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		return lines, nil
+	}
+
+	result := LogQueryResult{Entries: make([]json.RawMessage, 0, opts.Limit)}
+	hasMore := false
+	for _, filePath := range files {
+		lines, err := readBatch(filePath)
+		if err != nil {
+			return LogQueryResult{}, fmt.Errorf("read log batch: %w", err)
+		}
+		for i := len(lines) - 1; i >= 0; i-- {
+			line := lines[i]
+			if opts.Kind != "" && line.kind != opts.Kind {
+				continue
+			}
+			if opts.Level != "" && line.level != opts.Level {
+				continue
+			}
+			if opts.HasFrom || opts.HasTo || opts.HasBefore {
+				if !line.hasTS {
+					continue
+				}
+				if opts.HasFrom && line.ts.Before(opts.From) {
+					continue
+				}
+				if opts.HasTo && line.ts.After(opts.To) {
+					continue
+				}
+				if opts.HasBefore && !line.ts.Before(opts.Before) {
+					continue
+				}
+			}
+			result.Entries = append(result.Entries, line.raw)
+			if len(result.Entries) >= opts.Limit {
+				hasMore = true
+				if line.hasTS {
+					result.NextCursor = line.ts.Format(time.RFC3339Nano)
+				}
+				break
+			}
+		}
+		if hasMore {
+			break
+		}
+	}
+	return result, nil
+}
+
 func (s *deviceStore) retire(deviceID string, retiredAt time.Time, reason string) (DeviceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -526,6 +749,20 @@ func normalizePolicyVersion(raw string) string {
 		}
 	}
 	return raw
+}
+
+func parseStoreRFC3339Any(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts.UTC(), true
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts.UTC(), true
+	}
+	return time.Time{}, false
 }
 
 func safePathComponent(raw string) string {

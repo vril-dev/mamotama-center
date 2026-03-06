@@ -19,7 +19,7 @@ help:
 	@echo "  make config-check  Validate center config and exit"
 	@echo "  make device-revoke Revoke active key for one device (CENTER_URL + DEVICE_ID required)"
 	@echo "    - optional: REASON='compromised'"
-	@echo "    - optional: CENTER_LICENSE_KEY_FILE=..."
+	@echo "    - optional: CENTER_ADMIN_API_KEY_FILE=..."
 	@echo "  make test          Run tests"
 	@echo "  make test-race     Run tests with race detector"
 	@echo "  make fmt           Format Go code"
@@ -60,7 +60,7 @@ device-revoke:
 		echo "DEVICE_ID is required"; \
 		exit 1; \
 	fi
-	CENTER_LICENSE_KEY="$(CENTER_LICENSE_KEY)" CENTER_LICENSE_KEY_FILE="$(CENTER_LICENSE_KEY_FILE)" \
+	CENTER_ADMIN_API_KEY="$(CENTER_ADMIN_API_KEY)" CENTER_ADMIN_API_KEY_FILE="$(CENTER_ADMIN_API_KEY_FILE)" \
 		bash ./scripts/center_revoke.sh "$(CENTER_URL)" "$(DEVICE_ID)" "$(REASON)"
 
 clean:

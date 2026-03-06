@@ -22,6 +22,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	adminroutes "github.com/vril/mamotama-center/internal/center/http/admin"
+	edgeroutes "github.com/vril/mamotama-center/internal/center/http/edge"
 )
 
 type Server struct {
@@ -151,15 +154,22 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
-	s.mux.HandleFunc("/v1/enroll", s.handleEnroll)
-	s.mux.HandleFunc("/v1/heartbeat", s.handleHeartbeat)
-	s.mux.HandleFunc("/v1/policies", s.handlePolicies)
-	s.mux.HandleFunc("/v1/policies/", s.handlePolicyByVersion)
-	s.mux.HandleFunc("/v1/policy/pull", s.handlePolicyPull)
-	s.mux.HandleFunc("/v1/policy/ack", s.handlePolicyAck)
-	s.mux.HandleFunc("/v1/logs/push", s.handleLogsPush)
-	s.mux.HandleFunc("/v1/devices", s.handleDevices)
-	s.mux.HandleFunc("/v1/devices/", s.handleDevice)
+	edgeroutes.Register(s.mux, edgeroutes.Handlers{
+		Enroll:     s.handleEnroll,
+		Heartbeat:  s.handleHeartbeat,
+		PolicyPull: s.handlePolicyPull,
+		PolicyAck:  s.handlePolicyAck,
+		LogsPush:   s.handleLogsPush,
+	})
+	adminroutes.Register(s.mux, adminroutes.Handlers{
+		Policies:    s.handlePolicies,
+		PolicyByID:  s.handlePolicyByVersion,
+		Devices:     s.handleDevices,
+		DeviceByID:  s.handleDevice,
+		LogDevices:  s.handleAdminLogDevices,
+		LogEntries:  s.handleAdminLogs,
+		LogDownload: s.handleAdminLogsDownload,
+	})
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -470,6 +480,10 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
+	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		policies := s.store.listPolicies()
@@ -493,10 +507,6 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case http.MethodPost:
-		if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
-			writeError(w, http.StatusUnauthorized, "invalid license key")
-			return
-		}
 		var req policyUpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
@@ -536,6 +546,10 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid admin api key")
 		return
 	}
 	version, ok := parsePolicyVersionPath(r.URL.Path)
@@ -853,6 +867,10 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
+	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+		return
+	}
 
 	now := s.nowFn().UTC()
 	items := s.store.list()
@@ -895,6 +913,13 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "device_id is required in path")
 		return
 	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+		return
+	}
 	if action == "retire" {
 		s.handleRetireDevice(w, r, deviceID)
 		return
@@ -911,9 +936,6 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !s.ensureSecureTransport(w, r) {
-		return
-	}
 	rec, ok := s.store.get(deviceID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "device not found")
@@ -927,13 +949,6 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRetireDevice(w http.ResponseWriter, r *http.Request, deviceID string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !s.ensureSecureTransport(w, r) {
-		return
-	}
-	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid license key")
 		return
 	}
 
@@ -975,13 +990,6 @@ func (s *Server) handleRetireDevice(w http.ResponseWriter, r *http.Request, devi
 func (s *Server) handleRevokeDeviceKey(w http.ResponseWriter, r *http.Request, deviceID string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !s.ensureSecureTransport(w, r) {
-		return
-	}
-	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid license key")
 		return
 	}
 
@@ -1028,13 +1036,6 @@ func (s *Server) handleRevokeDeviceKey(w http.ResponseWriter, r *http.Request, d
 func (s *Server) handleAssignDesiredPolicy(w http.ResponseWriter, r *http.Request, deviceID string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !s.ensureSecureTransport(w, r) {
-		return
-	}
-	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid license key")
 		return
 	}
 
@@ -1482,6 +1483,19 @@ func (s *Server) hasValidLicense(got string) bool {
 		return false
 	}
 	for _, key := range s.cfg.Auth.EnrollmentLicenseKeys {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(key)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) hasValidAdminAPIKey(got string) bool {
+	got = strings.TrimSpace(got)
+	if got == "" {
+		return false
+	}
+	for _, key := range s.cfg.Auth.AdminAPIKeys {
 		if subtle.ConstantTimeCompare([]byte(got), []byte(key)) == 1 {
 			return true
 		}

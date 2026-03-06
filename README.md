@@ -23,14 +23,16 @@ Control plane for mamotama-edge.
   - accepts edge-reported `current_policy_version`, `current_policy_sha256`
   - returns desired/current policy state and `update_required`
 - `GET /v1/policies`
+  - header `X-API-Key` required
   - lists policy versions and desired/current usage summary
 - `POST /v1/policies`
-  - header `X-License-Key` required
+  - header `X-API-Key` required
   - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `note`)
 - `GET /v1/policies/{version}`
+  - header `X-API-Key` required
   - returns one policy and device usage counters
 - `POST /v1/devices/{device_id}:assign-policy`
-  - header `X-License-Key` required
+  - header `X-API-Key` required
   - sets device desired policy version
 - `POST /v1/policy/pull`
   - signed edge request to fetch assigned policy when update is required
@@ -39,15 +41,26 @@ Control plane for mamotama-edge.
 - `POST /v1/logs/push`
   - signed edge request to upload gzip-compressed ndjson log batch
 - `POST /v1/devices/{device_id}:revoke`
-  - header `X-License-Key` required
+  - header `X-API-Key` required
   - revokes active key for the device (heartbeat is rejected until re-enroll)
 - `GET /v1/devices`
+  - header `X-API-Key` required
   - returns device list with status flags
 - `GET /v1/devices/{device_id}`
+  - header `X-API-Key` required
   - returns one device with status flags
 - `POST /v1/devices/{device_id}:retire`
-  - header `X-License-Key` required
+  - header `X-API-Key` required
   - marks a device as retired (heartbeat is rejected after retire)
+- `GET /v1/admin/logs/devices`
+  - header `X-API-Key` required
+  - returns devices with available log batches
+- `GET /v1/admin/logs`
+  - header `X-API-Key` required
+  - query logs by `device_id` with `from/to/cursor/limit/kind/level`
+- `GET /v1/admin/logs/download`
+  - header `X-API-Key` required
+  - downloads filtered logs as NDJSON (`gzip=1` optional)
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
@@ -61,6 +74,7 @@ cp center.config.example.json center.config.json
 
 2. Edit `center.config.json`:
 - set `auth.enrollment_license_keys` (16+ chars, one or more keys)
+- set `auth.admin_api_keys` (16+ chars, one or more keys for center operator APIs)
 - keep `auth.require_tls=true` for production
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
@@ -146,7 +160,7 @@ make device-revoke \
   CENTER_URL=https://center.example.com \
   DEVICE_ID=device-001 \
   REASON=compromised \
-  CENTER_LICENSE_KEY_FILE=./center-license.key
+  CENTER_ADMIN_API_KEY_FILE=./center-admin-api.key
 ```
 
 2. Rotate key on edge (generate new keypair).

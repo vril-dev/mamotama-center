@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -26,13 +27,20 @@ type testDeviceKey struct {
 	KeyID        string
 }
 
+const testAdminAPIKey = "test-admin-api-key-1234"
+
 func newSignedTestConfig(t *testing.T) Config {
 	t.Helper()
 	cfg := defaultConfig()
 	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Auth.AdminAPIKeys = []string{testAdminAPIKey}
 	cfg.Auth.RequireTLS = false
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
 	return cfg
+}
+
+func addAdminAPIKey(req *http.Request) {
+	req.Header.Set("X-API-Key", testAdminAPIKey)
 }
 
 func newTestDeviceKey(t *testing.T) testDeviceKey {
@@ -292,6 +300,7 @@ func TestDevicesStatusFlagsOffline(t *testing.T) {
 	srv.nowFn = func() time.Time { return baseNow.Add(45 * time.Second) } // > 10*3 sec -> offline
 
 	listReq := httptest.NewRequest(http.MethodGet, "/v1/devices", nil)
+	addAdminAPIKey(listReq)
 	listRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(listRes, listReq)
 	if listRes.Code != http.StatusOK {
@@ -475,7 +484,7 @@ func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 
 	retireReqBody, _ := json.Marshal(map[string]any{"reason": "maintenance"})
 	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-retire:retire", bytes.NewReader(retireReqBody))
-	retireReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(retireReq)
 	retireRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(retireRes, retireReq)
 	if retireRes.Code != http.StatusOK {
@@ -503,7 +512,7 @@ func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 	}
 }
 
-func TestRetireRequiresValidLicense(t *testing.T) {
+func TestRetireRequiresAdminAPIKey(t *testing.T) {
 	t.Parallel()
 
 	cfg := newSignedTestConfig(t)
@@ -521,11 +530,19 @@ func TestRetireRequiresValidLicense(t *testing.T) {
 		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
 	}
 
+	retireReqNoKey := httptest.NewRequest(http.MethodPost, "/v1/devices/device-retire-auth:retire", bytes.NewReader([]byte(`{}`)))
+	retireResNoKey := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retireResNoKey, retireReqNoKey)
+	if retireResNoKey.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized without admin key, got %d body=%s", retireResNoKey.Code, retireResNoKey.Body.String())
+	}
+
 	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-retire-auth:retire", bytes.NewReader([]byte(`{}`)))
+	addAdminAPIKey(retireReq)
 	retireRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(retireRes, retireReq)
-	if retireRes.Code != http.StatusUnauthorized {
-		t.Fatalf("expected unauthorized, got %d body=%s", retireRes.Code, retireRes.Body.String())
+	if retireRes.Code != http.StatusOK {
+		t.Fatalf("expected success with admin key, got %d body=%s", retireRes.Code, retireRes.Body.String())
 	}
 }
 
@@ -551,7 +568,7 @@ func TestReEnrollReactivatesRetiredDevice(t *testing.T) {
 	}
 
 	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-reactivate:retire", bytes.NewReader([]byte(`{"reason":"test"}`)))
-	retireReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(retireReq)
 	retireRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(retireRes, retireReq)
 	if retireRes.Code != http.StatusOK {
@@ -624,7 +641,7 @@ func TestRevokeKeyBlocksHeartbeatUntilReEnroll(t *testing.T) {
 	}
 
 	revokeReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-revoke:revoke", bytes.NewReader([]byte(`{"reason":"compromised"}`)))
-	revokeReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(revokeReq)
 	revokeRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(revokeRes, revokeReq)
 	if revokeRes.Code != http.StatusOK {
@@ -783,7 +800,7 @@ func TestEndToEndEnrollHeartbeatRevokeReEnrollFlow(t *testing.T) {
 	}
 
 	revokeReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-e2e:revoke", bytes.NewReader([]byte(`{"reason":"test"}`)))
-	revokeReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(revokeReq)
 	revokeRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(revokeRes, revokeReq)
 	if revokeRes.Code != http.StatusOK {
@@ -836,7 +853,7 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 
 	putPolicyReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-2026-03-06","waf_raw":"{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}","note":"initial"}`))
-	putPolicyReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(putPolicyReq)
 	putPolicyRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(putPolicyRes, putPolicyReq)
 	if putPolicyRes.Code != http.StatusOK {
@@ -853,7 +870,7 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 
 	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
-	assignReq.Header.Set("X-License-Key", "test-license-key-1234")
+	addAdminAPIKey(assignReq)
 	assignRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(assignRes, assignReq)
 	if assignRes.Code != http.StatusOK {
@@ -967,5 +984,94 @@ func TestLogsPushStoresCompressedBatch(t *testing.T) {
 	}
 	if !entries[0].Type().IsRegular() {
 		t.Fatalf("expected regular file, got %v", entries[0].Type())
+	}
+}
+
+func TestAdminLogsEndpointsRequireAPIKey(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/devices", nil)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized without api key, got %d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestAdminLogsListAndDownload(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
+	srv.nowFn = func() time.Time { return baseTS }
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-admin-logs", key, baseTS, "admin-logs-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	logRaw := []byte(`{"timestamp":"2026-03-06T12:00:01Z","kind":"security","level":"warn","msg":"waf blocked","request_id":"r1"}` + "\n" +
+		`{"timestamp":"2026-03-06T12:00:02Z","kind":"access","level":"info","msg":"proxy ok","request_id":"r2"}` + "\n")
+	payload := gzipBytes(t, logRaw)
+	pushReq := httptest.NewRequest(http.MethodPost, "/v1/logs/push", bytes.NewReader(signedLogsPushPayload(t, "device-admin-logs", key, baseTS.Add(time.Second), "admin-logs-push-1", 2, payload)))
+	pushRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pushRes, pushReq)
+	if pushRes.Code != http.StatusOK {
+		t.Fatalf("logs push failed: %d body=%s", pushRes.Code, pushRes.Body.String())
+	}
+
+	devicesReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/devices", nil)
+	addAdminAPIKey(devicesReq)
+	devicesRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(devicesRes, devicesReq)
+	if devicesRes.Code != http.StatusOK {
+		t.Fatalf("log devices failed: %d body=%s", devicesRes.Code, devicesRes.Body.String())
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs?device_id=device-admin-logs&limit=1", nil)
+	addAdminAPIKey(listReq)
+	listRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listRes, listReq)
+	if listRes.Code != http.StatusOK {
+		t.Fatalf("log list failed: %d body=%s", listRes.Code, listRes.Body.String())
+	}
+	var listBody struct {
+		Count      int               `json:"count"`
+		NextCursor string            `json:"next_cursor"`
+		Entries    []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(listRes.Body.Bytes(), &listBody); err != nil {
+		t.Fatalf("decode log list body: %v", err)
+	}
+	if listBody.Count != 1 || len(listBody.Entries) != 1 || listBody.NextCursor == "" {
+		t.Fatalf("unexpected log list body: %s", listRes.Body.String())
+	}
+
+	downloadReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/download?device_id=device-admin-logs&limit=10&kind=security", nil)
+	addAdminAPIKey(downloadReq)
+	downloadRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(downloadRes, downloadReq)
+	if downloadRes.Code != http.StatusOK {
+		t.Fatalf("log download failed: %d body=%s", downloadRes.Code, downloadRes.Body.String())
+	}
+	downloadBody := strings.TrimSpace(downloadRes.Body.String())
+	if !strings.Contains(downloadBody, `"kind":"security"`) || strings.Contains(downloadBody, `"kind":"access"`) {
+		t.Fatalf("unexpected download body: %s", downloadBody)
 	}
 }
