@@ -31,21 +31,31 @@ type Server struct {
 
 type enrollRequest struct {
 	DeviceID                   string `json:"device_id"`
+	KeyID                      string `json:"key_id,omitempty"`
 	PublicKeyPEMBase64         string `json:"public_key_pem_b64"`
 	PublicKeyFingerprintSHA256 string `json:"public_key_fingerprint_sha256,omitempty"`
+	BodyHash                   string `json:"body_hash"`
 	Nonce                      string `json:"nonce,omitempty"`
 	Timestamp                  string `json:"timestamp,omitempty"`
+	SignatureB64               string `json:"signature_b64,omitempty"`
 }
 
 type heartbeatRequest struct {
 	DeviceID     string `json:"device_id"`
+	KeyID        string `json:"key_id"`
 	Timestamp    string `json:"timestamp"`
 	Nonce        string `json:"nonce"`
 	StatusHash   string `json:"status_hash,omitempty"`
+	BodyHash     string `json:"body_hash"`
 	SignatureB64 string `json:"signature_b64"`
 }
 
 type retireRequest struct {
+	Reason string `json:"reason,omitempty"`
+}
+
+type revokeKeyRequest struct {
+	KeyID  string `json:"key_id,omitempty"`
 	Reason string `json:"reason,omitempty"`
 }
 
@@ -98,6 +108,9 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
 	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
 		writeError(w, http.StatusUnauthorized, "invalid license key")
 		return
@@ -109,10 +122,24 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
 	req.PublicKeyPEMBase64 = strings.TrimSpace(req.PublicKeyPEMBase64)
 	req.PublicKeyFingerprintSHA256 = strings.ToLower(strings.TrimSpace(req.PublicKeyFingerprintSHA256))
-	if req.DeviceID == "" || req.PublicKeyPEMBase64 == "" {
-		writeError(w, http.StatusBadRequest, "device_id and public_key_pem_b64 are required")
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.PublicKeyPEMBase64 == "" || req.PublicKeyFingerprintSHA256 == "" || req.BodyHash == "" || req.Nonce == "" || req.Timestamp == "" || req.SignatureB64 == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, public_key_pem_b64, public_key_fingerprint_sha256, timestamp, nonce, body_hash, and signature_b64 are required")
+		return
+	}
+	if !isValidKeyID(req.KeyID) {
+		writeError(w, http.StatusBadRequest, "key_id is invalid")
+		return
+	}
+	msgTS, ok := parseRFC3339Any(req.Timestamp)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "timestamp must be RFC3339")
 		return
 	}
 
@@ -121,37 +148,113 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, "invalid public key")
 		return
 	}
-	if req.PublicKeyFingerprintSHA256 != "" && req.PublicKeyFingerprintSHA256 != fingerprint {
+	if req.PublicKeyFingerprintSHA256 != fingerprint {
 		writeError(w, http.StatusUnprocessableEntity, "public key fingerprint mismatch")
+		return
+	}
+	if !secureTextEqual(req.BodyHash, hashStringHex(enrollBodyCanonical(req))) {
+		writeError(w, http.StatusUnauthorized, "body_hash mismatch")
+		return
+	}
+
+	signature, err := base64.StdEncoding.DecodeString(req.SignatureB64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "signature_b64 is invalid base64")
+		return
+	}
+	pub, err := parseEd25519PublicKeyFromBase64PEM(req.PublicKeyPEMBase64)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "invalid public key")
+		return
+	}
+	if !ed25519.Verify(pub, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)), signature) {
+		writeError(w, http.StatusUnauthorized, "invalid enroll signature")
 		return
 	}
 
 	now := s.nowFn().UTC()
+	if !withinSkew(now, msgTS.UTC(), s.cfg.Heartbeat.MaxClockSkew.Duration) {
+		writeError(w, http.StatusUnauthorized, "timestamp out of allowed skew")
+		return
+	}
+
+	if existingByFP, fpExists := s.store.findByFingerprint(fingerprint); fpExists && existingByFP.DeviceID != req.DeviceID {
+		writeError(w, http.StatusConflict, "public key already bound to another device_id")
+		return
+	}
+
 	addr := remoteAddressOnly(r.RemoteAddr)
 	current, exists := s.store.get(req.DeviceID)
-	if existingByFP, ok := s.store.findByFingerprint(fingerprint); ok && existingByFP.DeviceID != req.DeviceID {
-		writeError(w, http.StatusConflict, "public key already bound to another device_id")
+	if exists && current.LastEnrollMessageAt != "" {
+		lastTS, parsed := parseRFC3339Any(current.LastEnrollMessageAt)
+		if parsed && !msgTS.UTC().After(lastTS.UTC()) {
+			writeError(w, http.StatusConflict, "stale or replayed enroll request")
+			return
+		}
+	}
+	if exists && current.LastEnrollNonce != "" && secureTextEqual(current.LastEnrollNonce, req.Nonce) {
+		writeError(w, http.StatusConflict, "reused enroll nonce")
 		return
 	}
 
 	rotated := false
 	reactivated := exists && strings.TrimSpace(current.RetiredAt) != ""
-	if exists && current.PublicKeyPEMBase64 != req.PublicKeyPEMBase64 {
+	if exists && (current.KeyID == "" || current.PublicKeyPEMBase64 == "" || current.PublicKeyFingerprintSHA256 == "") {
 		if !allowKeyRotation(r.Header.Get("X-Allow-Key-Rotation")) {
-			writeError(w, http.StatusConflict, "public key mismatch for existing device_id (set X-Allow-Key-Rotation: true to rotate)")
+			writeError(w, http.StatusConflict, "device key is revoked (set X-Allow-Key-Rotation: true to activate a new key)")
 			return
 		}
 		rotated = true
-		s.logger.Printf(`{"level":"warn","msg":"public key rotated","device_id":"%s","remote_addr":"%s"}`, req.DeviceID, addr)
+	}
+	if exists && !rotated && (current.KeyID != req.KeyID || current.PublicKeyPEMBase64 != req.PublicKeyPEMBase64) {
+		if !allowKeyRotation(r.Header.Get("X-Allow-Key-Rotation")) {
+			writeError(w, http.StatusConflict, "key mismatch for existing device_id (set X-Allow-Key-Rotation: true to rotate)")
+			return
+		}
+		rotated = true
+	}
+
+	keyVersion := 1
+	firstSeenAt := now.Format(time.RFC3339Nano)
+	revokedKeys := []RevokedKeyRecord(nil)
+	if exists {
+		if strings.TrimSpace(current.FirstSeenAt) != "" {
+			firstSeenAt = current.FirstSeenAt
+		}
+		keyVersion = current.KeyVersion
+		if keyVersion == 0 {
+			keyVersion = 1
+		}
+		if len(current.RevokedKeys) > 0 {
+			revokedKeys = append(revokedKeys, current.RevokedKeys...)
+		}
+		if rotated {
+			if current.KeyID != "" && current.PublicKeyPEMBase64 != "" && current.PublicKeyFingerprintSHA256 != "" {
+				revokedKeys = append(revokedKeys, RevokedKeyRecord{
+					KeyID:                      current.KeyID,
+					PublicKeyPEMBase64:         current.PublicKeyPEMBase64,
+					PublicKeyFingerprintSHA256: current.PublicKeyFingerprintSHA256,
+					RevokedAt:                  now.Format(time.RFC3339Nano),
+					Reason:                     "rotated",
+				})
+			}
+			keyVersion++
+			s.logger.Printf(`{"level":"warn","msg":"public key rotated","device_id":"%s","from_key_id":"%s","to_key_id":"%s","remote_addr":"%s"}`, req.DeviceID, current.KeyID, req.KeyID, addr)
+		}
 	}
 
 	rec := DeviceRecord{
 		DeviceID:                   req.DeviceID,
+		KeyID:                      req.KeyID,
+		KeyVersion:                 keyVersion,
 		PublicKeyPEMBase64:         req.PublicKeyPEMBase64,
 		PublicKeyFingerprintSHA256: fingerprint,
-		FirstSeenAt:                now.Format(time.RFC3339Nano),
+		RevokedKeys:                revokedKeys,
+		FirstSeenAt:                firstSeenAt,
 		LastSeenAt:                 now.Format(time.RFC3339Nano),
 		EnrolledAt:                 now.Format(time.RFC3339Nano),
+		LastEnrollMessageAt:        msgTS.UTC().Format(time.RFC3339Nano),
+		LastEnrollNonce:            req.Nonce,
 		LastEnrollIP:               addr,
 	}
 	saved, err := s.store.upsertEnroll(rec)
@@ -163,6 +266,8 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":        "ok",
 		"device_id":     saved.DeviceID,
+		"key_id":        saved.KeyID,
+		"key_version":   saved.KeyVersion,
 		"enrolled_at":   saved.EnrolledAt,
 		"fingerprint":   saved.PublicKeyFingerprintSHA256,
 		"already_known": exists,
@@ -177,6 +282,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
 
 	var req heartbeatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -184,12 +292,18 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
 	req.Timestamp = strings.TrimSpace(req.Timestamp)
 	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
 	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
 	req.StatusHash = strings.TrimSpace(req.StatusHash)
-	if req.DeviceID == "" || req.Timestamp == "" || req.Nonce == "" || req.SignatureB64 == "" {
-		writeError(w, http.StatusBadRequest, "device_id, timestamp, nonce, and signature_b64 are required")
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, body_hash, and signature_b64 are required")
+		return
+	}
+	if !isValidKeyID(req.KeyID) {
+		writeError(w, http.StatusBadRequest, "key_id is invalid")
 		return
 	}
 
@@ -202,14 +316,19 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, "device is retired")
 		return
 	}
+	if strings.TrimSpace(rec.KeyID) == "" || strings.TrimSpace(rec.PublicKeyPEMBase64) == "" {
+		writeError(w, http.StatusGone, "device key is revoked")
+		return
+	}
+	if rec.KeyID != req.KeyID {
+		writeError(w, http.StatusUnauthorized, "key_id mismatch")
+		return
+	}
 
-	msgTS, err := time.Parse(time.RFC3339Nano, req.Timestamp)
-	if err != nil {
-		msgTS, err = time.Parse(time.RFC3339, req.Timestamp)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "timestamp must be RFC3339")
-			return
-		}
+	msgTS, ok := parseRFC3339Any(req.Timestamp)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "timestamp must be RFC3339")
+		return
 	}
 	now := s.nowFn().UTC()
 	if !withinSkew(now, msgTS.UTC(), s.cfg.Heartbeat.MaxClockSkew.Duration) {
@@ -218,11 +337,19 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rec.LastHeartbeatMessageAt != "" {
-		lastTS, err := time.Parse(time.RFC3339Nano, rec.LastHeartbeatMessageAt)
-		if err == nil && !msgTS.UTC().After(lastTS.UTC()) {
+		lastTS, parsed := parseRFC3339Any(rec.LastHeartbeatMessageAt)
+		if parsed && !msgTS.UTC().After(lastTS.UTC()) {
 			writeError(w, http.StatusConflict, "stale or replayed heartbeat")
 			return
 		}
+	}
+	if rec.LastHeartbeatNonce != "" && secureTextEqual(rec.LastHeartbeatNonce, req.Nonce) {
+		writeError(w, http.StatusConflict, "reused heartbeat nonce")
+		return
+	}
+	if !secureTextEqual(req.BodyHash, hashStringHex(heartbeatBodyCanonical(req))) {
+		writeError(w, http.StatusUnauthorized, "body_hash mismatch")
+		return
 	}
 
 	pub, err := parseEd25519PublicKeyFromBase64PEM(rec.PublicKeyPEMBase64)
@@ -236,7 +363,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "signature_b64 is invalid base64")
 		return
 	}
-	message := heartbeatMessage(req.DeviceID, req.Timestamp, req.Nonce, req.StatusHash)
+	message := signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)
 	if !ed25519.Verify(pub, []byte(message), signature) {
 		writeError(w, http.StatusUnauthorized, "invalid heartbeat signature")
 		return
@@ -259,6 +386,9 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
 		return
 	}
 
@@ -307,8 +437,15 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		s.handleRetireDevice(w, r, deviceID)
 		return
 	}
+	if action == "revoke" {
+		s.handleRevokeDeviceKey(w, r, deviceID)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
 		return
 	}
 	rec, ok := s.store.get(deviceID)
@@ -324,6 +461,9 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRetireDevice(w http.ResponseWriter, r *http.Request, deviceID string) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
 		return
 	}
 	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
@@ -363,6 +503,59 @@ func (s *Server) handleRetireDevice(w http.ResponseWriter, r *http.Request, devi
 		"retired_at":    rec.RetiredAt,
 		"retire_reason": rec.RetireReason,
 		"device_status": s.buildDeviceStatus(rec, now),
+	})
+}
+
+func (s *Server) handleRevokeDeviceKey(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid license key")
+		return
+	}
+
+	req := revokeKeyRequest{}
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+	}
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.KeyID != "" && !isValidKeyID(req.KeyID) {
+		writeError(w, http.StatusBadRequest, "key_id is invalid")
+		return
+	}
+	if len(req.Reason) > 256 {
+		writeError(w, http.StatusBadRequest, "reason must be 256 chars or less")
+		return
+	}
+
+	now := s.nowFn().UTC()
+	rec, err := s.store.revokeKey(deviceID, req.KeyID, now, req.Reason)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "device/key not found")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist key revoke failed","device_id":"%s","error":"%s"}`, deviceID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist key revoke state")
+		return
+	}
+	s.logger.Printf(`{"level":"warn","msg":"device key revoked","device_id":"%s","revoked_key_id":"%s"}`, deviceID, req.KeyID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"device_id":     rec.DeviceID,
+		"active_key_id": rec.KeyID,
+		"device_status": s.buildDeviceStatus(rec, now),
+		"revoked_keys":  rec.RevokedKeys,
 	})
 }
 
@@ -481,11 +674,79 @@ func parseDevicePath(path string) (deviceID string, action string, ok bool) {
 		}
 		return deviceID, "retire", true
 	}
+	if strings.HasSuffix(deviceID, ":revoke") {
+		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":revoke"))
+		if deviceID == "" {
+			return "", "", false
+		}
+		return deviceID, "revoke", true
+	}
 	return deviceID, "", true
 }
 
 func heartbeatMessage(deviceID, timestamp, nonce, statusHash string) string {
 	return deviceID + "\n" + timestamp + "\n" + nonce + "\n" + statusHash
+}
+
+func signedEnvelopeMessage(deviceID, keyID, timestamp, nonce, bodyHash string) string {
+	return deviceID + "\n" + keyID + "\n" + timestamp + "\n" + nonce + "\n" + bodyHash
+}
+
+func enrollBodyCanonical(req enrollRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.PublicKeyPEMBase64 + "\n" + req.PublicKeyFingerprintSHA256 + "\n" + req.Timestamp + "\n" + req.Nonce
+}
+
+func heartbeatBodyCanonical(req heartbeatRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.StatusHash
+}
+
+func hashStringHex(raw string) string {
+	sum := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(sum[:])
+}
+
+func secureTextEqual(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func isValidKeyID(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if len(raw) < 8 || len(raw) > 128 {
+		return false
+	}
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.', r == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) ensureSecureTransport(w http.ResponseWriter, r *http.Request) bool {
+	if !s.cfg.Auth.RequireTLS {
+		return true
+	}
+	if r.TLS != nil {
+		return true
+	}
+	if s.cfg.Auth.TrustForwardedProto {
+		parts := strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")
+		if len(parts) > 0 && strings.EqualFold(strings.TrimSpace(parts[0]), "https") {
+			return true
+		}
+	}
+	writeError(w, http.StatusUpgradeRequired, "tls is required")
+	return false
 }
 
 func withinSkew(now, ts time.Time, skew time.Duration) bool {

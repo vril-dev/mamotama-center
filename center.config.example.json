@@ -10,7 +10,9 @@
   "auth": {
     "enrollment_license_keys": [
       "replace-with-strong-license-key-001"
-    ]
+    ],
+    "require_tls": true,
+    "trust_forwarded_proto": false
   },
   "storage": {
     "path": "./center-data/devices.json"

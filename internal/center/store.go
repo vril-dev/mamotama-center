@@ -6,24 +6,38 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
-type DeviceRecord struct {
-	DeviceID                   string `json:"device_id"`
+type RevokedKeyRecord struct {
+	KeyID                      string `json:"key_id"`
 	PublicKeyPEMBase64         string `json:"public_key_pem_b64"`
 	PublicKeyFingerprintSHA256 string `json:"public_key_fingerprint_sha256"`
-	FirstSeenAt                string `json:"first_seen_at"`
-	LastSeenAt                 string `json:"last_seen_at"`
-	EnrolledAt                 string `json:"enrolled_at"`
-	LastEnrollIP               string `json:"last_enroll_ip,omitempty"`
-	LastHeartbeatAt            string `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatMessageAt     string `json:"last_heartbeat_message_at,omitempty"`
-	LastHeartbeatNonce         string `json:"last_heartbeat_nonce,omitempty"`
-	LastHeartbeatStatusHash    string `json:"last_heartbeat_status_hash,omitempty"`
-	RetiredAt                  string `json:"retired_at,omitempty"`
-	RetireReason               string `json:"retire_reason,omitempty"`
+	RevokedAt                  string `json:"revoked_at"`
+	Reason                     string `json:"reason,omitempty"`
+}
+
+type DeviceRecord struct {
+	DeviceID                   string             `json:"device_id"`
+	KeyID                      string             `json:"key_id,omitempty"`
+	KeyVersion                 int                `json:"key_version,omitempty"`
+	PublicKeyPEMBase64         string             `json:"public_key_pem_b64"`
+	PublicKeyFingerprintSHA256 string             `json:"public_key_fingerprint_sha256"`
+	RevokedKeys                []RevokedKeyRecord `json:"revoked_keys,omitempty"`
+	FirstSeenAt                string             `json:"first_seen_at"`
+	LastSeenAt                 string             `json:"last_seen_at"`
+	EnrolledAt                 string             `json:"enrolled_at"`
+	LastEnrollMessageAt        string             `json:"last_enroll_message_at,omitempty"`
+	LastEnrollNonce            string             `json:"last_enroll_nonce,omitempty"`
+	LastEnrollIP               string             `json:"last_enroll_ip,omitempty"`
+	LastHeartbeatAt            string             `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatMessageAt     string             `json:"last_heartbeat_message_at,omitempty"`
+	LastHeartbeatNonce         string             `json:"last_heartbeat_nonce,omitempty"`
+	LastHeartbeatStatusHash    string             `json:"last_heartbeat_status_hash,omitempty"`
+	RetiredAt                  string             `json:"retired_at,omitempty"`
+	RetireReason               string             `json:"retire_reason,omitempty"`
 }
 
 type storedDevices struct {
@@ -61,6 +75,25 @@ func loadDeviceStore(path string) (*deviceStore, error) {
 		if rec.DeviceID == "" {
 			continue
 		}
+		rec.PublicKeyFingerprintSHA256 = strings.ToLower(strings.TrimSpace(rec.PublicKeyFingerprintSHA256))
+		rec.KeyID = strings.TrimSpace(rec.KeyID)
+		rec.LastEnrollNonce = strings.TrimSpace(rec.LastEnrollNonce)
+		rec.LastHeartbeatNonce = strings.TrimSpace(rec.LastHeartbeatNonce)
+		if rec.KeyID == "" && rec.PublicKeyFingerprintSHA256 != "" {
+			rec.KeyID = defaultKeyIDFromFingerprint(rec.PublicKeyFingerprintSHA256)
+		}
+		if rec.KeyVersion == 0 && rec.KeyID != "" {
+			rec.KeyVersion = 1
+		}
+		if len(rec.RevokedKeys) > 0 {
+			for i := range rec.RevokedKeys {
+				rec.RevokedKeys[i].KeyID = strings.TrimSpace(rec.RevokedKeys[i].KeyID)
+				rec.RevokedKeys[i].PublicKeyFingerprintSHA256 = strings.ToLower(strings.TrimSpace(rec.RevokedKeys[i].PublicKeyFingerprintSHA256))
+				if rec.RevokedKeys[i].KeyID == "" && rec.RevokedKeys[i].PublicKeyFingerprintSHA256 != "" {
+					rec.RevokedKeys[i].KeyID = defaultKeyIDFromFingerprint(rec.RevokedKeys[i].PublicKeyFingerprintSHA256)
+				}
+			}
+		}
 		s.devices[rec.DeviceID] = rec
 	}
 	return s, nil
@@ -87,11 +120,21 @@ func (s *deviceStore) list() []DeviceRecord {
 }
 
 func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool) {
+	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
+	if fingerprint == "" {
+		return DeviceRecord{}, false
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, rec := range s.devices {
 		if rec.PublicKeyFingerprintSHA256 == fingerprint {
 			return rec, true
+		}
+		for _, revoked := range rec.RevokedKeys {
+			if revoked.PublicKeyFingerprintSHA256 == fingerprint {
+				return rec, true
+			}
 		}
 	}
 	return DeviceRecord{}, false
@@ -107,6 +150,15 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 		rec.LastHeartbeatMessageAt = prev.LastHeartbeatMessageAt
 		rec.LastHeartbeatNonce = prev.LastHeartbeatNonce
 		rec.LastHeartbeatStatusHash = prev.LastHeartbeatStatusHash
+		if rec.KeyVersion == 0 {
+			rec.KeyVersion = prev.KeyVersion
+		}
+		if len(rec.RevokedKeys) == 0 && len(prev.RevokedKeys) > 0 {
+			rec.RevokedKeys = append([]RevokedKeyRecord(nil), prev.RevokedKeys...)
+		}
+	}
+	if rec.KeyVersion == 0 && rec.KeyID != "" {
+		rec.KeyVersion = 1
 	}
 	s.devices[rec.DeviceID] = rec
 	if err := s.saveLocked(); err != nil {
@@ -150,6 +202,60 @@ func (s *deviceStore) retire(deviceID string, retiredAt time.Time, reason string
 		return DeviceRecord{}, err
 	}
 	return rec, nil
+}
+
+func (s *deviceStore) revokeKey(deviceID string, keyID string, revokedAt time.Time, reason string) (DeviceRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		keyID = rec.KeyID
+	}
+	if keyID == "" {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+
+	for _, revoked := range rec.RevokedKeys {
+		if revoked.KeyID == keyID {
+			return rec, nil
+		}
+	}
+
+	if rec.KeyID != keyID {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+
+	rec.RevokedKeys = append(rec.RevokedKeys, RevokedKeyRecord{
+		KeyID:                      rec.KeyID,
+		PublicKeyPEMBase64:         rec.PublicKeyPEMBase64,
+		PublicKeyFingerprintSHA256: rec.PublicKeyFingerprintSHA256,
+		RevokedAt:                  revokedAt.UTC().Format(time.RFC3339Nano),
+		Reason:                     reason,
+	})
+	rec.KeyID = ""
+	rec.PublicKeyPEMBase64 = ""
+	rec.PublicKeyFingerprintSHA256 = ""
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
+	return rec, nil
+}
+
+func defaultKeyIDFromFingerprint(fingerprint string) string {
+	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
+	if fingerprint == "" {
+		return ""
+	}
+	if len(fingerprint) >= 16 {
+		return "ed25519-" + fingerprint[:16]
+	}
+	return "ed25519-" + fingerprint
 }
 
 func (s *deviceStore) saveLocked() error {

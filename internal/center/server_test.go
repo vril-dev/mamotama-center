@@ -16,18 +16,25 @@ import (
 	"time"
 )
 
-func TestEnrollAndHeartbeat(t *testing.T) {
-	t.Parallel()
+type testDeviceKey struct {
+	Public       ed25519.PublicKey
+	Private      ed25519.PrivateKey
+	PublicKeyB64 string
+	Fingerprint  string
+	KeyID        string
+}
 
+func newSignedTestConfig(t *testing.T) Config {
+	t.Helper()
 	cfg := defaultConfig()
 	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Auth.RequireTLS = false
 	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	return cfg
+}
 
-	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
-	if err != nil {
-		t.Fatalf("new server: %v", err)
-	}
-
+func newTestDeviceKey(t *testing.T) testDeviceKey {
+	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
@@ -42,14 +49,66 @@ func TestEnrollAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("validate pub key: %v", err)
 	}
-
-	enrollBody := map[string]any{
-		"device_id":                     "device-001",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
+	return testDeviceKey{
+		Public:       pub,
+		Private:      priv,
+		PublicKeyB64: pubB64,
+		Fingerprint:  fingerprint,
+		KeyID:        defaultKeyIDFromFingerprint(fingerprint),
 	}
-	enrollReqBody, _ := json.Marshal(enrollBody)
-	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+}
+
+func signedEnrollPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string) []byte {
+	t.Helper()
+	req := enrollRequest{
+		DeviceID:                   deviceID,
+		KeyID:                      key.KeyID,
+		PublicKeyPEMBase64:         key.PublicKeyB64,
+		PublicKeyFingerprintSHA256: key.Fingerprint,
+		Timestamp:                  ts.UTC().Format(time.RFC3339Nano),
+		Nonce:                      nonce,
+	}
+	req.BodyHash = hashStringHex(enrollBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal enroll payload: %v", err)
+	}
+	return b
+}
+
+func signedHeartbeatPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, statusHash string) []byte {
+	t.Helper()
+	req := heartbeatRequest{
+		DeviceID:   deviceID,
+		KeyID:      key.KeyID,
+		Timestamp:  ts.UTC().Format(time.RFC3339Nano),
+		Nonce:      nonce,
+		StatusHash: statusHash,
+	}
+	req.BodyHash = hashStringHex(heartbeatBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal heartbeat payload: %v", err)
+	}
+	return b
+}
+
+func TestEnrollAndHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-001", key, time.Now().UTC(), "enroll-nonce-001")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	enrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(enrollRes, enrollReq)
@@ -57,20 +116,7 @@ func TestEnrollAndHeartbeat(t *testing.T) {
 		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
 	}
 
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	nonce := "nonce-001"
-	statusHash := "abc123"
-	message := heartbeatMessage("device-001", ts, nonce, statusHash)
-	signature := ed25519.Sign(priv, []byte(message))
-	heartbeatBody := map[string]any{
-		"device_id":     "device-001",
-		"timestamp":     ts,
-		"nonce":         nonce,
-		"status_hash":   statusHash,
-		"signature_b64": base64.StdEncoding.EncodeToString(signature),
-	}
-	heartbeatReqBody, _ := json.Marshal(heartbeatBody)
-	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(heartbeatReqBody))
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-001", key, time.Now().UTC(), "nonce-001", "abc123")))
 	heartbeatRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
 	if heartbeatRes.Code != http.StatusOK {
@@ -81,9 +127,7 @@ func TestEnrollAndHeartbeat(t *testing.T) {
 func TestEnrollRejectsInvalidLicense(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
@@ -101,9 +145,7 @@ func TestEnrollRejectsInvalidLicense(t *testing.T) {
 func TestHeartbeatRejectsReplay(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
 
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
@@ -111,27 +153,9 @@ func TestHeartbeatRejectsReplay(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
+	key := newTestDeviceKey(t)
 
-	enrollReqBody, _ := json.Marshal(map[string]any{
-		"device_id":                     "device-002",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
-	})
-	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-002", key, time.Now().UTC(), "enroll-nonce-002")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	enrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(enrollRes, enrollReq)
@@ -139,16 +163,7 @@ func TestHeartbeatRejectsReplay(t *testing.T) {
 		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
 	}
 
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	msg := heartbeatMessage("device-002", ts, "nonce-1", "")
-	sig := base64.StdEncoding.EncodeToString(ed25519.Sign(priv, []byte(msg)))
-	heartbeatPayload := map[string]any{
-		"device_id":     "device-002",
-		"timestamp":     ts,
-		"nonce":         "nonce-1",
-		"signature_b64": sig,
-	}
-	heartbeatBody, _ := json.Marshal(heartbeatPayload)
+	heartbeatBody := signedHeartbeatPayload(t, "device-002", key, time.Now().UTC(), "nonce-1", "")
 
 	firstReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(heartbeatBody))
 	firstRes := httptest.NewRecorder()
@@ -168,9 +183,7 @@ func TestHeartbeatRejectsReplay(t *testing.T) {
 func TestDevicesStatusFlagsOffline(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	cfg.Heartbeat.ExpectedInterval.Duration = 10 * time.Second
 	cfg.Heartbeat.MissedHeartbeatsForOffline = 3
 	cfg.Heartbeat.StaleAfter.Duration = 2 * time.Minute
@@ -182,27 +195,8 @@ func TestDevicesStatusFlagsOffline(t *testing.T) {
 	}
 	srv.nowFn = func() time.Time { return baseNow }
 
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
-
-	enrollReqBody, _ := json.Marshal(map[string]any{
-		"device_id":                     "device-offline",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
-	})
-	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-offline", key, baseNow, "enroll-nonce-offline")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	enrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(enrollRes, enrollReq)
@@ -277,44 +271,20 @@ func TestStatusFromHeartbeatAge(t *testing.T) {
 func TestEnrollRejectsPublicKeyMismatchWithoutRotationHeader(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
-	makePayload := func(pubB64, fingerprint string) []byte {
-		b, _ := json.Marshal(map[string]any{
-			"device_id":                     "device-rotate",
-			"public_key_pem_b64":            pubB64,
-			"public_key_fingerprint_sha256": fingerprint,
-		})
-		return b
-	}
-
-	makeKey := func(t *testing.T) (string, string) {
+	makeKey := func(t *testing.T) testDeviceKey {
 		t.Helper()
-		pub, _, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatalf("generate key: %v", err)
-		}
-		der, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			t.Fatalf("marshal pub key: %v", err)
-		}
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-		pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-		fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-		if err != nil {
-			t.Fatalf("validate pub key: %v", err)
-		}
-		return pubB64, fingerprint
+		return newTestDeviceKey(t)
 	}
 
-	pub1, fp1 := makeKey(t)
-	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub1, fp1)))
+	baseTS := time.Now().UTC()
+	key1 := makeKey(t)
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-rotate", key1, baseTS, "enroll-nonce-rotate-1")))
 	firstReq.Header.Set("X-License-Key", "test-license-key-1234")
 	firstRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(firstRes, firstReq)
@@ -322,8 +292,8 @@ func TestEnrollRejectsPublicKeyMismatchWithoutRotationHeader(t *testing.T) {
 		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
 	}
 
-	pub2, fp2 := makeKey(t)
-	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub2, fp2)))
+	key2 := makeKey(t)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-rotate", key2, baseTS.Add(time.Second), "enroll-nonce-rotate-2")))
 	secondReq.Header.Set("X-License-Key", "test-license-key-1234")
 	secondRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(secondRes, secondReq)
@@ -335,44 +305,20 @@ func TestEnrollRejectsPublicKeyMismatchWithoutRotationHeader(t *testing.T) {
 func TestEnrollAllowsPublicKeyRotationWithHeader(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
-	makePayload := func(pubB64, fingerprint string) []byte {
-		b, _ := json.Marshal(map[string]any{
-			"device_id":                     "device-rotate-ok",
-			"public_key_pem_b64":            pubB64,
-			"public_key_fingerprint_sha256": fingerprint,
-		})
-		return b
-	}
-
-	makeKey := func(t *testing.T) (string, string) {
+	makeKey := func(t *testing.T) testDeviceKey {
 		t.Helper()
-		pub, _, err := ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			t.Fatalf("generate key: %v", err)
-		}
-		der, err := x509.MarshalPKIXPublicKey(pub)
-		if err != nil {
-			t.Fatalf("marshal pub key: %v", err)
-		}
-		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-		pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-		fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-		if err != nil {
-			t.Fatalf("validate pub key: %v", err)
-		}
-		return pubB64, fingerprint
+		return newTestDeviceKey(t)
 	}
 
-	pub1, fp1 := makeKey(t)
-	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub1, fp1)))
+	baseTS := time.Now().UTC()
+	key1 := makeKey(t)
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-rotate-ok", key1, baseTS, "enroll-nonce-rotate-ok-1")))
 	firstReq.Header.Set("X-License-Key", "test-license-key-1234")
 	firstRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(firstRes, firstReq)
@@ -380,8 +326,8 @@ func TestEnrollAllowsPublicKeyRotationWithHeader(t *testing.T) {
 		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
 	}
 
-	pub2, fp2 := makeKey(t)
-	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub2, fp2)))
+	key2 := makeKey(t)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-rotate-ok", key2, baseTS.Add(time.Second), "enroll-nonce-rotate-ok-2")))
 	secondReq.Header.Set("X-License-Key", "test-license-key-1234")
 	secondReq.Header.Set("X-Allow-Key-Rotation", "true")
 	secondRes := httptest.NewRecorder()
@@ -394,48 +340,29 @@ func TestEnrollAllowsPublicKeyRotationWithHeader(t *testing.T) {
 func TestEnrollRejectsFingerprintReuseAcrossDeviceIDs(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
 
-	makeReq := func(deviceID string) *http.Request {
-		body, _ := json.Marshal(map[string]any{
-			"device_id":                     deviceID,
-			"public_key_pem_b64":            pubB64,
-			"public_key_fingerprint_sha256": fingerprint,
-		})
-		req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body))
+	makeReq := func(deviceID string, ts time.Time, nonce string) *http.Request {
+		req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, deviceID, key, ts, nonce)))
 		req.Header.Set("X-License-Key", "test-license-key-1234")
 		return req
 	}
 
 	firstRes := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(firstRes, makeReq("device-a"))
+	srv.Handler().ServeHTTP(firstRes, makeReq("device-a", baseTS, "enroll-nonce-device-a"))
 	if firstRes.Code != http.StatusOK {
 		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
 	}
 
 	secondRes := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(secondRes, makeReq("device-b"))
+	srv.Handler().ServeHTTP(secondRes, makeReq("device-b", baseTS.Add(time.Second), "enroll-nonce-device-b"))
 	if secondRes.Code != http.StatusConflict {
 		t.Fatalf("expected conflict for fingerprint reuse, got %d body=%s", secondRes.Code, secondRes.Body.String())
 	}
@@ -444,9 +371,7 @@ func TestEnrollRejectsFingerprintReuseAcrossDeviceIDs(t *testing.T) {
 func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
 
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
@@ -454,27 +379,8 @@ func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 		t.Fatalf("new server: %v", err)
 	}
 
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
-
-	enrollReqBody, _ := json.Marshal(map[string]any{
-		"device_id":                     "device-retire",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
-	})
-	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-retire", key, time.Now().UTC(), "enroll-nonce-retire")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	enrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(enrollRes, enrollReq)
@@ -504,17 +410,7 @@ func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 		t.Fatalf("unexpected retire status body: %s", retireRes.Body.String())
 	}
 
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
-	nonce := "nonce-after-retire"
-	message := heartbeatMessage("device-retire", ts, nonce, "")
-	signature := ed25519.Sign(priv, []byte(message))
-	heartbeatBody, _ := json.Marshal(map[string]any{
-		"device_id":     "device-retire",
-		"timestamp":     ts,
-		"nonce":         nonce,
-		"signature_b64": base64.StdEncoding.EncodeToString(signature),
-	})
-	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-retire", key, time.Now().UTC(), "nonce-after-retire", "")))
 	heartbeatRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
 	if heartbeatRes.Code != http.StatusGone {
@@ -525,35 +421,14 @@ func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
 func TestRetireRequiresValidLicense(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
-
-	enrollReqBody, _ := json.Marshal(map[string]any{
-		"device_id":                     "device-retire-auth",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
-	})
-	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-retire-auth", key, time.Now().UTC(), "enroll-nonce-retire-auth")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	enrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(enrollRes, enrollReq)
@@ -572,35 +447,15 @@ func TestRetireRequiresValidLicense(t *testing.T) {
 func TestReEnrollReactivatesRetiredDevice(t *testing.T) {
 	t.Parallel()
 
-	cfg := defaultConfig()
-	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
-	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg := newSignedTestConfig(t)
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
 		t.Fatalf("new server: %v", err)
 	}
 
-	pub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	der, err := x509.MarshalPKIXPublicKey(pub)
-	if err != nil {
-		t.Fatalf("marshal pub key: %v", err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
-	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
-	if err != nil {
-		t.Fatalf("validate pub key: %v", err)
-	}
-
-	enrollPayload := map[string]any{
-		"device_id":                     "device-reactivate",
-		"public_key_pem_b64":            pubB64,
-		"public_key_fingerprint_sha256": fingerprint,
-	}
-	enrollReqBody, _ := json.Marshal(enrollPayload)
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+	enrollReqBody := signedEnrollPayload(t, "device-reactivate", key, baseTS, "enroll-nonce-reactivate-1")
 
 	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
@@ -618,7 +473,7 @@ func TestReEnrollReactivatesRetiredDevice(t *testing.T) {
 		t.Fatalf("unexpected retire status: %d body=%s", retireRes.Code, retireRes.Body.String())
 	}
 
-	reenrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	reenrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-reactivate", key, baseTS.Add(time.Second), "enroll-nonce-reactivate-2")))
 	reenrollReq.Header.Set("X-License-Key", "test-license-key-1234")
 	reenrollRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(reenrollRes, reenrollReq)
@@ -639,5 +494,107 @@ func TestReEnrollReactivatesRetiredDevice(t *testing.T) {
 	}
 	if reenrollBody.DeviceState.Status == "retired" {
 		t.Fatalf("expected non-retired status after re-enroll, body=%s", reenrollRes.Body.String())
+	}
+}
+
+func TestEnrollRequiresTLSWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Auth.RequireTLS = true
+	cfg.Auth.TrustForwardedProto = false
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-tls", key, time.Now().UTC(), "enroll-nonce-tls")))
+	req.Header.Set("X-License-Key", "test-license-key-1234")
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUpgradeRequired {
+		t.Fatalf("expected tls required, got %d body=%s", res.Code, res.Body.String())
+	}
+}
+
+func TestRevokeKeyBlocksHeartbeatUntilReEnroll(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	baseTS := time.Now().UTC()
+	key1 := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-revoke", key1, baseTS, "enroll-nonce-revoke-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-revoke:revoke", bytes.NewReader([]byte(`{"reason":"compromised"}`)))
+	revokeReq.Header.Set("X-License-Key", "test-license-key-1234")
+	revokeRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(revokeRes, revokeReq)
+	if revokeRes.Code != http.StatusOK {
+		t.Fatalf("unexpected revoke status: %d body=%s", revokeRes.Code, revokeRes.Body.String())
+	}
+
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-revoke", key1, baseTS.Add(time.Second), "hb-nonce-revoke-1", "")))
+	heartbeatRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusGone {
+		t.Fatalf("expected heartbeat rejected after revoke, got %d body=%s", heartbeatRes.Code, heartbeatRes.Body.String())
+	}
+
+	key2 := newTestDeviceKey(t)
+	reenrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-revoke", key2, baseTS.Add(2*time.Second), "enroll-nonce-revoke-2")))
+	reenrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	reenrollReq.Header.Set("X-Allow-Key-Rotation", "true")
+	reenrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(reenrollRes, reenrollReq)
+	if reenrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected re-enroll after revoke status: %d body=%s", reenrollRes.Code, reenrollRes.Body.String())
+	}
+}
+
+func TestHeartbeatRejectsNonceReuse(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	baseTS := time.Now().UTC()
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-nonce", key, baseTS, "enroll-nonce-nonce-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-nonce", key, baseTS.Add(time.Second), "hb-nonce-1", "")))
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first heartbeat status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-nonce", key, baseTS.Add(2*time.Second), "hb-nonce-1", "")))
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusConflict {
+		t.Fatalf("expected heartbeat nonce reuse conflict, got %d body=%s", secondRes.Code, secondRes.Body.String())
 	}
 }

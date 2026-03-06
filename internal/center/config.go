@@ -26,6 +26,8 @@ type ServerConfig struct {
 
 type AuthConfig struct {
 	EnrollmentLicenseKeys []string `json:"enrollment_license_keys"`
+	RequireTLS            bool     `json:"require_tls"`
+	TrustForwardedProto   bool     `json:"trust_forwarded_proto"`
 }
 
 type StorageConfig struct {
@@ -51,6 +53,8 @@ func defaultConfig() Config {
 		},
 		Auth: AuthConfig{
 			EnrollmentLicenseKeys: nil,
+			RequireTLS:            true,
+			TrustForwardedProto:   false,
 		},
 		Storage: StorageConfig{
 			Path: "./center-data/devices.json",

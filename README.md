@@ -11,13 +11,18 @@ Control plane for mamotama-edge.
 
 - `POST /v1/enroll`
   - header `X-License-Key` required
-  - registers `device_id` + edge public key
+  - requires signed payload fields: `device_id`, `key_id`, `timestamp`, `nonce`, `body_hash`, `signature_b64`
+  - registers `device_id -> (key_id, public_key)`
   - key rotation is rejected by default for existing `device_id`
   - set `X-Allow-Key-Rotation: true` to rotate key for existing `device_id`
   - rejects same public key registration under another `device_id`
 - `POST /v1/heartbeat`
+  - requires signed payload fields: `device_id`, `key_id`, `timestamp`, `nonce`, `body_hash`, `signature_b64`
   - verifies Ed25519 signature using enrolled public key
-  - applies timestamp skew and replay checks
+  - applies timestamp skew and replay checks (`timestamp` + `nonce`)
+- `POST /v1/devices/{device_id}:revoke`
+  - header `X-License-Key` required
+  - revokes active key for the device (heartbeat is rejected until re-enroll)
 - `GET /v1/devices`
   - returns device list with status flags
 - `GET /v1/devices/{device_id}`
@@ -38,6 +43,8 @@ cp center.config.example.json center.config.json
 
 2. Edit `center.config.json`:
 - set `auth.enrollment_license_keys` (16+ chars, one or more keys)
+- keep `auth.require_tls=true` for production
+- if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - set `storage.path` (persistent file path)
 - optional: tune `heartbeat.max_clock_skew`
 - optional: tune `heartbeat.expected_interval`
@@ -57,15 +64,33 @@ Validation only:
 make config-check CONFIG=./center.config.json
 ```
 
-## Heartbeat Signature Format
+## Request Signature Format
 
-Edge signs this message with its private key:
+Both `POST /v1/enroll` and `POST /v1/heartbeat` use:
+
+1) `body_hash = sha256_hex(canonical_body_string)`
+
+2) `signature_b64 = Base64(Ed25519Sign(private_key, envelope_message))`
+
+envelope message:
 
 ```text
-device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
+device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + body_hash
 ```
 
-`signature_b64` is Base64(Ed25519 signature bytes).
+Canonical body strings:
+
+`enroll`:
+
+```text
+device_id + "\n" + key_id + "\n" + public_key_pem_b64 + "\n" + public_key_fingerprint_sha256 + "\n" + timestamp + "\n" + nonce
+```
+
+`heartbeat`:
+
+```text
+device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
+```
 
 ## Device Status Flags
 
