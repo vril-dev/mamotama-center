@@ -168,7 +168,9 @@ func (s *Server) routes() {
 		DeviceByID:  s.handleDevice,
 		LogDevices:  s.handleAdminLogDevices,
 		LogEntries:  s.handleAdminLogs,
+		LogSummary:  s.handleAdminLogsSummary,
 		LogDownload: s.handleAdminLogsDownload,
+		LogUI:       s.handleAdminLogsUI,
 	})
 }
 

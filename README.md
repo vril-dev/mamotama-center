@@ -58,9 +58,14 @@ Control plane for mamotama-edge.
 - `GET /v1/admin/logs`
   - header `X-API-Key` required
   - query logs by `device_id` with `from/to/cursor/limit/kind/level`
+- `GET /v1/admin/logs/summary`
+  - header `X-API-Key` required
+  - summarizes logs by optional `device_id` / `from` / `to` / `kind` / `level`
 - `GET /v1/admin/logs/download`
   - header `X-API-Key` required
   - downloads filtered logs as NDJSON (`gzip=1` optional)
+- `GET /admin/logs`
+  - minimal TLS-only admin page for log device list, summary, query, and download
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
@@ -147,6 +152,25 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - pruning order:
   - remove files older than `storage.log_retention`
   - then, if total remaining size exceeds `storage.log_max_bytes`, remove oldest files first (latest batch is kept)
+
+## Admin Log APIs
+
+All admin log APIs require HTTPS/TLS and `X-API-Key` except `GET /admin/logs` (UI shell only).
+
+`GET /v1/admin/logs/summary` query:
+- `device_id` optional (if omitted, aggregate across all devices)
+- `from`, `to` optional RFC3339 timestamps
+- `kind` optional: `access|security|system`
+- `level` optional: `info|warn|error`
+
+`GET /v1/admin/logs/summary` response:
+- `summary.total_entries`
+- `summary.latest_timestamp`
+- `summary.by_device[]` (`device_id`, `entries`, `latest_timestamp`)
+- `summary.by_kind`
+- `summary.by_level`
+- `filters` (normalized request filters)
+- `storage_policy` (`log_retention`, `log_max_bytes`)
 
 ## Re-enrollment Guardrails
 

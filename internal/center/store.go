@@ -99,6 +99,30 @@ type LogQueryResult struct {
 	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
+type LogSummaryOptions struct {
+	DeviceID string
+	From     time.Time
+	HasFrom  bool
+	To       time.Time
+	HasTo    bool
+	Kind     string
+	Level    string
+}
+
+type LogDeviceSummary struct {
+	DeviceID        string `json:"device_id"`
+	Entries         int64  `json:"entries"`
+	LatestTimestamp string `json:"latest_timestamp,omitempty"`
+}
+
+type LogSummaryResult struct {
+	TotalEntries    int64              `json:"total_entries"`
+	LatestTimestamp string             `json:"latest_timestamp,omitempty"`
+	ByDevice        []LogDeviceSummary `json:"by_device"`
+	ByKind          map[string]int64   `json:"by_kind"`
+	ByLevel         map[string]int64   `json:"by_level"`
+}
+
 type logBatchFile struct {
 	path    string
 	modTime time.Time
@@ -780,6 +804,171 @@ func (s *deviceStore) queryLogs(deviceID string, opts LogQueryOptions) (LogQuery
 		if hasMore {
 			break
 		}
+	}
+	return result, nil
+}
+
+func (s *deviceStore) summarizeLogs(opts LogSummaryOptions) (LogSummaryResult, error) {
+	opts.DeviceID = strings.TrimSpace(opts.DeviceID)
+	opts.Kind = strings.ToLower(strings.TrimSpace(opts.Kind))
+	opts.Level = strings.ToLower(strings.TrimSpace(opts.Level))
+
+	switch opts.Kind {
+	case "", "access", "security", "system":
+	default:
+		return LogSummaryResult{}, errStoreInvalid
+	}
+	switch opts.Level {
+	case "", "info", "warn", "error":
+	default:
+		return LogSummaryResult{}, errStoreInvalid
+	}
+
+	s.mu.RLock()
+	deviceIDs := make([]string, 0, len(s.devices))
+	if opts.DeviceID != "" {
+		if _, ok := s.devices[opts.DeviceID]; !ok {
+			s.mu.RUnlock()
+			return LogSummaryResult{}, os.ErrNotExist
+		}
+		deviceIDs = append(deviceIDs, opts.DeviceID)
+	} else {
+		for deviceID := range s.devices {
+			deviceIDs = append(deviceIDs, deviceID)
+		}
+		sort.Strings(deviceIDs)
+	}
+	s.mu.RUnlock()
+
+	result := LogSummaryResult{
+		ByDevice: make([]LogDeviceSummary, 0, len(deviceIDs)),
+		ByKind: map[string]int64{
+			"access":   0,
+			"security": 0,
+			"system":   0,
+		},
+		ByLevel: map[string]int64{
+			"info":  0,
+			"warn":  0,
+			"error": 0,
+		},
+	}
+	var globalLatest time.Time
+
+	logsRoot := filepath.Join(filepath.Dir(s.path), "logs")
+	for _, deviceID := range deviceIDs {
+		deviceDir := filepath.Join(logsRoot, safePathComponent(deviceID))
+		dirEntries, err := os.ReadDir(deviceDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return LogSummaryResult{}, fmt.Errorf("read log dir: %w", err)
+		}
+
+		files := make([]string, 0, len(dirEntries))
+		for _, entry := range dirEntries {
+			if entry.IsDir() {
+				continue
+			}
+			if strings.HasSuffix(strings.ToLower(entry.Name()), ".ndjson.gz") {
+				files = append(files, filepath.Join(deviceDir, entry.Name()))
+			}
+		}
+		sort.Strings(files)
+
+		var deviceCount int64
+		var deviceLatest time.Time
+		for _, filePath := range files {
+			f, err := os.Open(filePath)
+			if err != nil {
+				return LogSummaryResult{}, fmt.Errorf("open log batch: %w", err)
+			}
+			zr, err := gzip.NewReader(f)
+			if err != nil {
+				_ = f.Close()
+				return LogSummaryResult{}, fmt.Errorf("open gzip log batch: %w", err)
+			}
+
+			sc := bufio.NewScanner(zr)
+			sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
+			for sc.Scan() {
+				line := strings.TrimSpace(sc.Text())
+				if line == "" {
+					continue
+				}
+				var meta struct {
+					Timestamp string `json:"timestamp"`
+					Kind      string `json:"kind"`
+					Level     string `json:"level"`
+				}
+				if err := json.Unmarshal([]byte(line), &meta); err != nil {
+					continue
+				}
+				kind := strings.ToLower(strings.TrimSpace(meta.Kind))
+				level := strings.ToLower(strings.TrimSpace(meta.Level))
+				if opts.Kind != "" && kind != opts.Kind {
+					continue
+				}
+				if opts.Level != "" && level != opts.Level {
+					continue
+				}
+				ts, hasTS := parseStoreRFC3339Any(meta.Timestamp)
+				if opts.HasFrom || opts.HasTo {
+					if !hasTS {
+						continue
+					}
+					if opts.HasFrom && ts.Before(opts.From) {
+						continue
+					}
+					if opts.HasTo && ts.After(opts.To) {
+						continue
+					}
+				}
+
+				deviceCount++
+				result.TotalEntries++
+				if _, ok := result.ByKind[kind]; ok {
+					result.ByKind[kind]++
+				}
+				if _, ok := result.ByLevel[level]; ok {
+					result.ByLevel[level]++
+				}
+				if hasTS {
+					if deviceLatest.IsZero() || ts.After(deviceLatest) {
+						deviceLatest = ts
+					}
+					if globalLatest.IsZero() || ts.After(globalLatest) {
+						globalLatest = ts
+					}
+				}
+			}
+			if err := sc.Err(); err != nil && !errors.Is(err, io.EOF) {
+				_ = zr.Close()
+				_ = f.Close()
+				return LogSummaryResult{}, fmt.Errorf("scan log batch: %w", err)
+			}
+			_ = zr.Close()
+			_ = f.Close()
+		}
+		if deviceCount == 0 {
+			continue
+		}
+		item := LogDeviceSummary{
+			DeviceID: deviceID,
+			Entries:  deviceCount,
+		}
+		if !deviceLatest.IsZero() {
+			item.LatestTimestamp = deviceLatest.UTC().Format(time.RFC3339Nano)
+		}
+		result.ByDevice = append(result.ByDevice, item)
+	}
+
+	sort.Slice(result.ByDevice, func(i, j int) bool {
+		return result.ByDevice[i].DeviceID < result.ByDevice[j].DeviceID
+	})
+	if !globalLatest.IsZero() {
+		result.LatestTimestamp = globalLatest.UTC().Format(time.RFC3339Nano)
 	}
 	return result, nil
 }

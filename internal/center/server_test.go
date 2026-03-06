@@ -1003,6 +1003,39 @@ func TestAdminLogsEndpointsRequireAPIKey(t *testing.T) {
 	if res.Code != http.StatusUnauthorized {
 		t.Fatalf("expected unauthorized without api key, got %d body=%s", res.Code, res.Body.String())
 	}
+
+	reqSummary := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/summary", nil)
+	resSummary := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(resSummary, reqSummary)
+	if resSummary.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized summary without api key, got %d body=%s", resSummary.Code, resSummary.Body.String())
+	}
+}
+
+func TestAdminLogsSummaryValidation(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	invalidReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/summary?kind=invalid", nil)
+	addAdminAPIKey(invalidReq)
+	invalidRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(invalidRes, invalidReq)
+	if invalidRes.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request for invalid kind, got %d body=%s", invalidRes.Code, invalidRes.Body.String())
+	}
+
+	notFoundReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/summary?device_id=not-found-device", nil)
+	addAdminAPIKey(notFoundReq)
+	notFoundRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(notFoundRes, notFoundReq)
+	if notFoundRes.Code != http.StatusNotFound {
+		t.Fatalf("expected not found for unknown device, got %d body=%s", notFoundRes.Code, notFoundRes.Body.String())
+	}
 }
 
 func TestAdminLogsListAndDownload(t *testing.T) {
@@ -1064,6 +1097,29 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 		t.Fatalf("unexpected log list body: %s", listRes.Body.String())
 	}
 
+	summaryReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/summary?device_id=device-admin-logs", nil)
+	addAdminAPIKey(summaryReq)
+	summaryRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(summaryRes, summaryReq)
+	if summaryRes.Code != http.StatusOK {
+		t.Fatalf("log summary failed: %d body=%s", summaryRes.Code, summaryRes.Body.String())
+	}
+	var summaryBody struct {
+		Summary struct {
+			TotalEntries int64            `json:"total_entries"`
+			ByKind       map[string]int64 `json:"by_kind"`
+		} `json:"summary"`
+	}
+	if err := json.Unmarshal(summaryRes.Body.Bytes(), &summaryBody); err != nil {
+		t.Fatalf("decode summary body: %v", err)
+	}
+	if summaryBody.Summary.TotalEntries != 2 {
+		t.Fatalf("unexpected summary total_entries: %d body=%s", summaryBody.Summary.TotalEntries, summaryRes.Body.String())
+	}
+	if summaryBody.Summary.ByKind["security"] != 1 || summaryBody.Summary.ByKind["access"] != 1 {
+		t.Fatalf("unexpected by_kind summary: %+v", summaryBody.Summary.ByKind)
+	}
+
 	downloadReq := httptest.NewRequest(http.MethodGet, "/v1/admin/logs/download?device_id=device-admin-logs&limit=10&kind=security", nil)
 	addAdminAPIKey(downloadReq)
 	downloadRes := httptest.NewRecorder()
@@ -1074,6 +1130,16 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 	downloadBody := strings.TrimSpace(downloadRes.Body.String())
 	if !strings.Contains(downloadBody, `"kind":"security"`) || strings.Contains(downloadBody, `"kind":"access"`) {
 		t.Fatalf("unexpected download body: %s", downloadBody)
+	}
+
+	uiReq := httptest.NewRequest(http.MethodGet, "/admin/logs", nil)
+	uiRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(uiRes, uiReq)
+	if uiRes.Code != http.StatusOK {
+		t.Fatalf("admin logs ui failed: %d body=%s", uiRes.Code, uiRes.Body.String())
+	}
+	if got := uiRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "text/html") {
+		t.Fatalf("unexpected admin logs ui content-type: %s", got)
 	}
 }
 

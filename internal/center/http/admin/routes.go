@@ -9,7 +9,9 @@ type Handlers struct {
 	DeviceByID  http.HandlerFunc
 	LogDevices  http.HandlerFunc
 	LogEntries  http.HandlerFunc
+	LogSummary  http.HandlerFunc
 	LogDownload http.HandlerFunc
+	LogUI       http.HandlerFunc
 }
 
 func Register(mux *http.ServeMux, h Handlers) {
@@ -34,7 +36,13 @@ func Register(mux *http.ServeMux, h Handlers) {
 	if h.LogEntries != nil {
 		mux.HandleFunc("/v1/admin/logs", h.LogEntries)
 	}
+	if h.LogSummary != nil {
+		mux.HandleFunc("/v1/admin/logs/summary", h.LogSummary)
+	}
 	if h.LogDownload != nil {
 		mux.HandleFunc("/v1/admin/logs/download", h.LogDownload)
+	}
+	if h.LogUI != nil {
+		mux.HandleFunc("/admin/logs", h.LogUI)
 	}
 }
