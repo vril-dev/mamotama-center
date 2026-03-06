@@ -34,7 +34,9 @@ type AuthConfig struct {
 }
 
 type StorageConfig struct {
-	Path string `json:"path"`
+	Path         string   `json:"path"`
+	LogRetention Duration `json:"log_retention"`
+	LogMaxBytes  int64    `json:"log_max_bytes"`
 }
 
 type HeartbeatConfig struct {
@@ -63,7 +65,9 @@ func defaultConfig() Config {
 			MaxNoncesPerDevice:    256,
 		},
 		Storage: StorageConfig{
-			Path: "./center-data/devices.json",
+			Path:         "./center-data/devices.json",
+			LogRetention: Duration{Duration: 30 * 24 * time.Hour},
+			LogMaxBytes:  5 * 1024 * 1024 * 1024,
 		},
 		Heartbeat: HeartbeatConfig{
 			MaxClockSkew:               Duration{Duration: 5 * time.Minute},
@@ -113,6 +117,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.Storage.Path == "" {
 		return fmt.Errorf("storage.path is required")
+	}
+	if cfg.Storage.LogRetention.Duration < 0 {
+		return fmt.Errorf("storage.log_retention must be >= 0")
+	}
+	if cfg.Storage.LogMaxBytes < 0 {
+		return fmt.Errorf("storage.log_max_bytes must be >= 0")
 	}
 	if len(cfg.Auth.EnrollmentLicenseKeys) == 0 {
 		return fmt.Errorf("auth.enrollment_license_keys requires at least one key")

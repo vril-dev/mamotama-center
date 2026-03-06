@@ -132,7 +132,7 @@ type deviceStatusView struct {
 }
 
 func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
-	store, err := loadDeviceStore(cfg.Storage.Path)
+	store, err := loadDeviceStore(cfg.Storage)
 	if err != nil {
 		return nil, fmt.Errorf("load device store: %w", err)
 	}

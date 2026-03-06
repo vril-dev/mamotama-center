@@ -99,23 +99,34 @@ type LogQueryResult struct {
 	NextCursor string            `json:"next_cursor,omitempty"`
 }
 
+type logBatchFile struct {
+	path    string
+	modTime time.Time
+	size    int64
+}
+
 type storedDevices struct {
 	Devices  []DeviceRecord `json:"devices"`
 	Policies []PolicyRecord `json:"policies,omitempty"`
 }
 
 type deviceStore struct {
-	mu       sync.RWMutex
-	path     string
-	devices  map[string]DeviceRecord
-	policies map[string]PolicyRecord
+	mu           sync.RWMutex
+	path         string
+	logRetention time.Duration
+	logMaxBytes  int64
+	devices      map[string]DeviceRecord
+	policies     map[string]PolicyRecord
 }
 
-func loadDeviceStore(path string) (*deviceStore, error) {
+func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
+	path := strings.TrimSpace(cfg.Path)
 	s := &deviceStore{
-		path:     path,
-		devices:  map[string]DeviceRecord{},
-		policies: map[string]PolicyRecord{},
+		path:         path,
+		logRetention: cfg.LogRetention.Duration,
+		logMaxBytes:  cfg.LogMaxBytes,
+		devices:      map[string]DeviceRecord{},
+		policies:     map[string]PolicyRecord{},
 	}
 
 	b, err := os.ReadFile(path)
@@ -464,6 +475,9 @@ func (s *deviceStore) saveLogBatch(deviceID string, messageAt time.Time, nonce s
 		_ = os.Remove(tmpPath)
 		return DeviceRecord{}, "", fmt.Errorf("rename log batch: %w", err)
 	}
+	if err := s.enforceLogLimitsLocked(time.Now().UTC()); err != nil {
+		return DeviceRecord{}, "", err
+	}
 
 	rec.LastLogUploadAt = messageAt.UTC().Format(time.RFC3339Nano)
 	rec.LastLogUploadEntries = entryCount
@@ -474,6 +488,106 @@ func (s *deviceStore) saveLogBatch(deviceID string, messageAt time.Time, nonce s
 		return DeviceRecord{}, "", err
 	}
 	return rec, outPath, nil
+}
+
+func (s *deviceStore) enforceLogLimitsLocked(now time.Time) error {
+	if s.logRetention <= 0 && s.logMaxBytes <= 0 {
+		return nil
+	}
+	logsRoot := filepath.Join(filepath.Dir(s.path), "logs")
+	rootEntries, err := os.ReadDir(logsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read logs root: %w", err)
+	}
+
+	files := make([]logBatchFile, 0, 256)
+	for _, deviceEntry := range rootEntries {
+		if !deviceEntry.IsDir() {
+			continue
+		}
+		deviceDir := filepath.Join(logsRoot, deviceEntry.Name())
+		entries, err := os.ReadDir(deviceDir)
+		if err != nil {
+			return fmt.Errorf("read device logs dir: %w", err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := strings.ToLower(entry.Name())
+			if !strings.HasSuffix(name, ".ndjson.gz") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return fmt.Errorf("stat log batch: %w", err)
+			}
+			files = append(files, logBatchFile{
+				path:    filepath.Join(deviceDir, entry.Name()),
+				modTime: info.ModTime().UTC(),
+				size:    info.Size(),
+			})
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modTime.Equal(files[j].modTime) {
+			return files[i].path < files[j].path
+		}
+		return files[i].modTime.Before(files[j].modTime)
+	})
+
+	keep := make([]logBatchFile, 0, len(files))
+	if s.logRetention > 0 {
+		cutoff := now.Add(-s.logRetention)
+		for _, f := range files {
+			if f.modTime.Before(cutoff) {
+				if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("remove expired log batch: %w", err)
+				}
+				continue
+			}
+			keep = append(keep, f)
+		}
+	} else {
+		keep = append(keep, files...)
+	}
+
+	if s.logMaxBytes > 0 {
+		var total int64
+		for _, f := range keep {
+			total += f.size
+		}
+		for len(keep) > 1 && total > s.logMaxBytes {
+			f := keep[0]
+			keep = keep[1:]
+			total -= f.size
+			if err := os.Remove(f.path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove over-capacity log batch: %w", err)
+			}
+		}
+	}
+
+	for _, deviceEntry := range rootEntries {
+		if !deviceEntry.IsDir() {
+			continue
+		}
+		deviceDir := filepath.Join(logsRoot, deviceEntry.Name())
+		entries, err := os.ReadDir(deviceDir)
+		if err != nil {
+			continue
+		}
+		if len(entries) == 0 {
+			_ = os.Remove(deviceDir)
+		}
+	}
+	return nil
 }
 
 func (s *deviceStore) listLogDevices() ([]LogDeviceRecord, error) {

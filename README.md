@@ -79,6 +79,8 @@ cp center.config.example.json center.config.json
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
 - set `storage.path` (persistent file path)
+- optional: set `storage.log_retention` (default `720h` = 30 days, `0` disables age-based pruning)
+- optional: set `storage.log_max_bytes` (default `5368709120` = 5 GiB, `0` disables size-based pruning)
 - optional: tune `heartbeat.max_clock_skew`
 - optional: tune `heartbeat.expected_interval`
 - optional: tune `heartbeat.missed_heartbeats_for_offline`
@@ -137,6 +139,14 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - `retired`: device was retired via admin API
 
 `degraded` / `offline` / `stale` / `retired` are returned with `flagged=true`.
+
+## Log Retention
+
+- log batches uploaded via `POST /v1/logs/push` are stored under `<storage.path dir>/logs/<device_id>/`
+- pruning runs automatically on each log push
+- pruning order:
+  - remove files older than `storage.log_retention`
+  - then, if total remaining size exceeds `storage.log_max_bytes`, remove oldest files first (latest batch is kept)
 
 ## Re-enrollment Guardrails
 

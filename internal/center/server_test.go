@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1073,5 +1074,138 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 	downloadBody := strings.TrimSpace(downloadRes.Body.String())
 	if !strings.Contains(downloadBody, `"kind":"security"`) || strings.Contains(downloadBody, `"kind":"access"`) {
 		t.Fatalf("unexpected download body: %s", downloadBody)
+	}
+}
+
+func TestLogsPushPrunesExpiredBatchesByRetention(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	cfg.Storage.LogRetention.Duration = 1 * time.Hour
+	cfg.Storage.LogMaxBytes = 1024 * 1024 * 1024
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-prune-retention", key, baseTS, "prune-retention-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	payload1 := gzipBytes(t, []byte(`{"timestamp":"2026-03-06T12:00:01Z","kind":"security","msg":"old-batch"}`+"\n"))
+	pushReq1 := httptest.NewRequest(http.MethodPost, "/v1/logs/push", bytes.NewReader(signedLogsPushPayload(t, "device-prune-retention", key, baseTS.Add(time.Second), "prune-retention-push-1", 1, payload1)))
+	pushRes1 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pushRes1, pushReq1)
+	if pushRes1.Code != http.StatusOK {
+		t.Fatalf("first logs push failed: %d body=%s", pushRes1.Code, pushRes1.Body.String())
+	}
+	var body1 struct {
+		LogBatch struct {
+			StoredPath string `json:"stored_path"`
+		} `json:"log_batch"`
+	}
+	if err := json.Unmarshal(pushRes1.Body.Bytes(), &body1); err != nil {
+		t.Fatalf("decode first logs push body: %v", err)
+	}
+	if body1.LogBatch.StoredPath == "" {
+		t.Fatalf("missing stored_path in first logs push body: %s", pushRes1.Body.String())
+	}
+	oldTS := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(body1.LogBatch.StoredPath, oldTS, oldTS); err != nil {
+		t.Fatalf("set old mtime: %v", err)
+	}
+
+	payload2 := gzipBytes(t, []byte(`{"timestamp":"2026-03-06T12:00:02Z","kind":"security","msg":"new-batch"}`+"\n"))
+	pushReq2 := httptest.NewRequest(http.MethodPost, "/v1/logs/push", bytes.NewReader(signedLogsPushPayload(t, "device-prune-retention", key, baseTS.Add(2*time.Second), "prune-retention-push-2", 1, payload2)))
+	pushRes2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pushRes2, pushReq2)
+	if pushRes2.Code != http.StatusOK {
+		t.Fatalf("second logs push failed: %d body=%s", pushRes2.Code, pushRes2.Body.String())
+	}
+	var body2 struct {
+		LogBatch struct {
+			StoredPath string `json:"stored_path"`
+		} `json:"log_batch"`
+	}
+	if err := json.Unmarshal(pushRes2.Body.Bytes(), &body2); err != nil {
+		t.Fatalf("decode second logs push body: %v", err)
+	}
+	if body2.LogBatch.StoredPath == "" {
+		t.Fatalf("missing stored_path in second logs push body: %s", pushRes2.Body.String())
+	}
+
+	if _, err := os.Stat(body1.LogBatch.StoredPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old batch removed by retention, stat err=%v", err)
+	}
+	if _, err := os.Stat(body2.LogBatch.StoredPath); err != nil {
+		t.Fatalf("expected new batch to remain, stat err=%v", err)
+	}
+}
+
+func TestLogsPushPrunesOldestBatchesByCapacity(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	cfg.Storage.LogRetention.Duration = 30 * 24 * time.Hour
+	cfg.Storage.LogMaxBytes = 1
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-prune-capacity", key, baseTS, "prune-capacity-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	push := func(idx int) string {
+		payload := gzipBytes(t, []byte(`{"timestamp":"2026-03-06T12:00:0`+strconv.Itoa(idx)+`Z","kind":"security","msg":"batch-`+strconv.Itoa(idx)+`"}`+"\n"))
+		req := httptest.NewRequest(http.MethodPost, "/v1/logs/push", bytes.NewReader(signedLogsPushPayload(t, "device-prune-capacity", key, baseTS.Add(time.Duration(idx)*time.Second), "prune-capacity-push-"+strconv.Itoa(idx), 1, payload)))
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("logs push #%d failed: %d body=%s", idx, res.Code, res.Body.String())
+		}
+		var body struct {
+			LogBatch struct {
+				StoredPath string `json:"stored_path"`
+			} `json:"log_batch"`
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode logs push #%d body: %v", idx, err)
+		}
+		if body.LogBatch.StoredPath == "" {
+			t.Fatalf("missing stored_path for push #%d", idx)
+		}
+		return body.LogBatch.StoredPath
+	}
+
+	path1 := push(1)
+	path2 := push(2)
+	path3 := push(3)
+
+	if _, err := os.Stat(path1); !os.IsNotExist(err) {
+		t.Fatalf("expected oldest batch removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(path2); !os.IsNotExist(err) {
+		t.Fatalf("expected middle batch removed due capacity cap, stat err=%v", err)
+	}
+	if _, err := os.Stat(path3); err != nil {
+		t.Fatalf("expected latest batch to remain, stat err=%v", err)
 	}
 }
