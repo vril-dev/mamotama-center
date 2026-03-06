@@ -34,6 +34,9 @@ Control plane for mamotama-edge.
 - `POST /v1/devices/{device_id}:assign-policy`
   - header `X-API-Key` required
   - sets device desired policy version
+- `GET /v1/devices/{device_id}:download-policy`
+  - header `X-API-Key` required
+  - downloads device policy rule (`state=desired|current`, `format=raw|json`)
 - `POST /v1/policy/pull`
   - signed edge request to fetch assigned policy when update is required
 - `POST /v1/policy/ack`
@@ -171,6 +174,10 @@ All admin log APIs require HTTPS/TLS and `X-API-Key` except `GET /admin/logs` (U
 - `summary.by_level`
 - `filters` (normalized request filters)
 - `storage_policy` (`log_retention`, `log_max_bytes`)
+
+`GET /v1/devices/{device_id}:download-policy` query:
+- `state` optional: `desired` (default) or `current`
+- `format` optional: `raw` (default, `text/plain` attachment) or `json`
 
 ## Re-enrollment Guardrails
 

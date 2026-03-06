@@ -938,6 +938,113 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 }
 
+func TestDevicePolicyDownload(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
+	srv.nowFn = func() time.Time { return baseTS }
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-policy-download", key, baseTS, "policy-download-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	putPolicyReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-2026-03-06","waf_raw":"SecRuleEngine On\nSecRule ARGS:test \"@contains bad\" \"id:1001,phase:2,deny\"","note":"download-test"}`))
+	addAdminAPIKey(putPolicyReq)
+	putPolicyRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putPolicyRes, putPolicyReq)
+	if putPolicyRes.Code != http.StatusOK {
+		t.Fatalf("policy upsert failed: %d body=%s", putPolicyRes.Code, putPolicyRes.Body.String())
+	}
+	var putBody struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(putPolicyRes.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode policy upsert body: %v", err)
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy-download:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
+	addAdminAPIKey(assignReq)
+	assignRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignRes, assignReq)
+	if assignRes.Code != http.StatusOK {
+		t.Fatalf("assign policy failed: %d body=%s", assignRes.Code, assignRes.Body.String())
+	}
+
+	desiredReq := httptest.NewRequest(http.MethodGet, "/v1/devices/device-policy-download:download-policy?state=desired", nil)
+	addAdminAPIKey(desiredReq)
+	desiredRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(desiredRes, desiredReq)
+	if desiredRes.Code != http.StatusOK {
+		t.Fatalf("desired policy download failed: %d body=%s", desiredRes.Code, desiredRes.Body.String())
+	}
+	if got := strings.ToLower(desiredRes.Header().Get("Content-Type")); !strings.Contains(got, "text/plain") {
+		t.Fatalf("unexpected content-type: %s", got)
+	}
+	if !strings.Contains(desiredRes.Body.String(), "SecRuleEngine On") {
+		t.Fatalf("unexpected desired policy body: %s", desiredRes.Body.String())
+	}
+
+	noCurrentReq := httptest.NewRequest(http.MethodGet, "/v1/devices/device-policy-download:download-policy?state=current", nil)
+	addAdminAPIKey(noCurrentReq)
+	noCurrentRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(noCurrentRes, noCurrentReq)
+	if noCurrentRes.Code != http.StatusConflict {
+		t.Fatalf("expected current policy conflict before heartbeat, got %d body=%s", noCurrentRes.Code, noCurrentRes.Body.String())
+	}
+
+	hbReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(
+		t,
+		"device-policy-download",
+		key,
+		baseTS.Add(time.Second),
+		"policy-download-hb-1",
+		"",
+		putBody.Policy.Version,
+		putBody.Policy.SHA256,
+	)))
+	hbRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes, hbReq)
+	if hbRes.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d body=%s", hbRes.Code, hbRes.Body.String())
+	}
+
+	currentJSONReq := httptest.NewRequest(http.MethodGet, "/v1/devices/device-policy-download:download-policy?state=current&format=json", nil)
+	addAdminAPIKey(currentJSONReq)
+	currentJSONRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(currentJSONRes, currentJSONReq)
+	if currentJSONRes.Code != http.StatusOK {
+		t.Fatalf("current policy json download failed: %d body=%s", currentJSONRes.Code, currentJSONRes.Body.String())
+	}
+	var currentJSONBody struct {
+		State  string `json:"state"`
+		Policy struct {
+			Version string `json:"version"`
+			WAFRaw  string `json:"waf_raw"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(currentJSONRes.Body.Bytes(), &currentJSONBody); err != nil {
+		t.Fatalf("decode current policy json body: %v", err)
+	}
+	if currentJSONBody.State != "current" || currentJSONBody.Policy.Version != putBody.Policy.Version {
+		t.Fatalf("unexpected current policy json body: %s", currentJSONRes.Body.String())
+	}
+	if !strings.Contains(currentJSONBody.Policy.WAFRaw, "SecRule ARGS:test") {
+		t.Fatalf("unexpected current policy raw in json body: %s", currentJSONRes.Body.String())
+	}
+}
+
 func TestLogsPushStoresCompressedBatch(t *testing.T) {
 	t.Parallel()
 

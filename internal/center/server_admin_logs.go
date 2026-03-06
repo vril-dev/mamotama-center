@@ -394,9 +394,11 @@ const adminLogsPageHTML = `<!doctype html>
           <button id="loadSummary">Load Summary</button>
           <button id="loadLogs">Load Logs</button>
           <button id="downloadLogs" class="secondary">Download NDJSON</button>
+          <select id="policyState"><option value="desired">desired</option><option value="current">current</option></select>
+          <button id="downloadRule" class="secondary">Download Rule</button>
         </div>
         <div id="err" class="error"></div>
-        <div class="muted">API: <code>/v1/admin/logs/devices</code>, <code>/v1/admin/logs/summary</code>, <code>/v1/admin/logs</code>, <code>/v1/admin/logs/download</code></div>
+        <div class="muted">API: <code>/v1/admin/logs/devices</code>, <code>/v1/admin/logs/summary</code>, <code>/v1/admin/logs</code>, <code>/v1/admin/logs/download</code>, <code>/v1/devices/{device_id}:download-policy</code></div>
       </div>
       <div class="panel">
         <label>Summary</label>
@@ -482,6 +484,26 @@ const adminLogsPageHTML = `<!doctype html>
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
           a.download = "center-logs.ndjson";
+          a.click();
+          URL.revokeObjectURL(a.href);
+        })
+        .catch(e => setErr(String(e.message || e)));
+    };
+
+    byId("downloadRule").onclick = () => {
+      const device = byId("deviceSelect").value.trim();
+      if (!device) {
+        setErr("device is required");
+        return;
+      }
+      const state = byId("policyState").value.trim() || "desired";
+      const url = "/v1/devices/" + encodeURIComponent(device) + ":download-policy?state=" + encodeURIComponent(state);
+      fetch(url, { headers: { "X-API-Key": byId("apiKey").value.trim() } })
+        .then(r => { if (!r.ok) return r.text().then(t => Promise.reject(new Error(t || ("HTTP " + r.status)))); return r.blob(); })
+        .then(blob => {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = device + "-" + state + ".waf";
           a.click();
           URL.revokeObjectURL(a.href);
         })

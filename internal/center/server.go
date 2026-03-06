@@ -934,6 +934,10 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		s.handleAssignDesiredPolicy(w, r, deviceID)
 		return
 	}
+	if action == "download-policy" {
+		s.handleDownloadDevicePolicy(w, r, deviceID)
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -1081,6 +1085,91 @@ func (s *Server) handleAssignDesiredPolicy(w http.ResponseWriter, r *http.Reques
 		},
 		"device_status": s.buildDeviceStatus(saved, now),
 	})
+}
+
+func (s *Server) handleDownloadDevicePolicy(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	state := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("state")))
+	if state == "" {
+		state = "desired"
+	}
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if format == "" {
+		format = "raw"
+	}
+	if state != "desired" && state != "current" {
+		writeError(w, http.StatusBadRequest, "state must be desired|current")
+		return
+	}
+	if format != "raw" && format != "json" {
+		writeError(w, http.StatusBadRequest, "format must be raw|json")
+		return
+	}
+
+	rec, ok := s.store.get(deviceID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+
+	version := rec.DesiredPolicyVersion
+	assignedAt := rec.DesiredPolicyAssignedAt
+	if state == "current" {
+		version = rec.CurrentPolicyVersion
+		assignedAt = rec.LastPolicySyncAt
+	}
+	if version == "" {
+		if state == "current" {
+			writeError(w, http.StatusConflict, "current policy is not set")
+			return
+		}
+		writeError(w, http.StatusConflict, "desired policy is not assigned")
+		return
+	}
+
+	pol, found := s.store.getPolicy(version)
+	if !found {
+		writeError(w, http.StatusConflict, "policy not found")
+		return
+	}
+
+	if format == "json" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"device_id": deviceID,
+			"state":     state,
+			"policy": map[string]any{
+				"version":      pol.Version,
+				"sha256":       pol.SHA256,
+				"waf_raw":      pol.WAFRaw,
+				"note":         pol.Note,
+				"created_at":   pol.CreatedAt,
+				"updated_at":   pol.UpdatedAt,
+				"assigned_at":  rec.DesiredPolicyAssignedAt,
+				"last_sync_at": rec.LastPolicySyncAt,
+			},
+		})
+		return
+	}
+
+	filename := fmt.Sprintf(
+		"%s-%s-%s.waf",
+		sanitizeDownloadName(deviceID),
+		sanitizeDownloadName(pol.Version),
+		state,
+	)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Header().Set("X-Policy-Version", pol.Version)
+	w.Header().Set("X-Policy-SHA256", pol.SHA256)
+	w.Header().Set("X-Policy-State", state)
+	if assignedAt != "" {
+		w.Header().Set("X-Policy-Assigned-At", assignedAt)
+	}
+	_, _ = w.Write([]byte(pol.WAFRaw))
 }
 
 func (s *Server) buildDeviceStatus(rec DeviceRecord, now time.Time) deviceStatusView {
@@ -1282,6 +1371,13 @@ func parseDevicePath(path string) (deviceID string, action string, ok bool) {
 			return "", "", false
 		}
 		return deviceID, "assign-policy", true
+	}
+	if strings.HasSuffix(deviceID, ":download-policy") {
+		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":download-policy"))
+		if deviceID == "" {
+			return "", "", false
+		}
+		return deviceID, "download-policy", true
 	}
 	return deviceID, "", true
 }
