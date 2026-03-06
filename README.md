@@ -212,11 +212,31 @@ Notes:
 - During revoked state, `POST /v1/heartbeat` returns `410 Gone` for that device.
 - `scripts/center_revoke.sh` enforces HTTPS by default (`CENTER_ALLOW_INSECURE_HTTP=1` only for local dev).
 
+## Policy Download Runbook
+
+Download one device policy (desired/current) as raw rule text:
+
+```bash
+make device-policy-download \
+  CENTER_URL=https://center.example.com \
+  DEVICE_ID=device-001 \
+  POLICY_STATE=desired \
+  POLICY_FORMAT=raw \
+  OUT=./device-001-desired.waf \
+  CENTER_ADMIN_API_KEY_FILE=./center-admin-api.key
+```
+
+Notes:
+- set `POLICY_STATE=current` to fetch the currently applied policy snapshot.
+- set `POLICY_FORMAT=json` to include metadata with `waf_raw` in JSON.
+- `scripts/center_policy_download.sh` enforces HTTPS by default (`CENTER_ALLOW_INSECURE_HTTP=1` only for local dev).
+
 ## Build Targets
 
 - `make build`
 - `make run`
 - `make config-check`
+- `make device-policy-download`
 - `make check`
 - integration flow test:
   - `go test ./internal/center -run TestEndToEndEnrollHeartbeatRevokeReEnrollFlow`
