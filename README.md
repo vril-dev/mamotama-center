@@ -2,6 +2,9 @@
 
 Control plane for mamotama-edge.
 
+- English: `README.md`
+- 日本語: `README.ja.md`
+
 `mamotama-center` is a single-binary service for:
 - edge device enrollment
 - heartbeat verification
@@ -91,6 +94,7 @@ Control plane for mamotama-edge.
   - supports profile-based base-map switching (e.g., staging vs production)
   - shows profile-to-profile base-map diffs by device key
   - profile diff view supports filters: all, changed-only, missing-in-current, missing-in-compare
+  - profile diff can be searched and sorted in table view
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 

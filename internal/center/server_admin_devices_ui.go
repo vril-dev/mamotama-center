@@ -198,6 +198,32 @@ const adminDevicesPageHTML = `<!doctype html>
             <option value="missing_compare">missing in compare</option>
           </select>
         </div>
+        <div style="min-width:260px; flex:1;">
+          <label>Profile Diff Search</label>
+          <input id="rfProfileDiffSearch" placeholder="search by key or value">
+        </div>
+        <div style="min-width:220px; flex:1;">
+          <label>Profile Diff Sort</label>
+          <select id="rfProfileDiffSort" style="min-width:180px;">
+            <option value="key_asc">key asc</option>
+            <option value="key_desc">key desc</option>
+            <option value="type_key">type then key</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Profile Map Diff Table</label>
+        <table id="rfProfileDiffTable">
+          <thead>
+            <tr>
+              <th>device key</th>
+              <th>type</th>
+              <th>current</th>
+              <th>compare</th>
+            </tr>
+          </thead>
+          <tbody id="rfProfileDiffTableBody"></tbody>
+        </table>
       </div>
       <div style="margin-top:8px;">
         <label>Profile Map Diff</label>
@@ -384,11 +410,47 @@ const adminDevicesPageHTML = `<!doctype html>
       renderProfileMapDiff();
     }
 
+    function profileDiffType(currentVal, compareVal) {
+      const currentMissing = currentVal === "";
+      const compareMissing = compareVal === "";
+      if (currentMissing && !compareMissing) return "missing_current";
+      if (!currentMissing && compareMissing) return "missing_compare";
+      return "changed";
+    }
+
+    function includeProfileDiffType(diffType, filter) {
+      if (filter === "changed") return diffType === "changed";
+      if (filter === "missing_current") return diffType === "missing_current";
+      if (filter === "missing_compare") return diffType === "missing_compare";
+      return true;
+    }
+
+    function sortProfileDiffRows(rows, mode) {
+      rows.sort((a, b) => {
+        if (mode === "key_desc") {
+          return b.key.localeCompare(a.key);
+        }
+        if (mode === "type_key") {
+          const order = { changed: 0, missing_current: 1, missing_compare: 2 };
+          const ao = order[a.type] ?? 99;
+          const bo = order[b.type] ?? 99;
+          if (ao !== bo) return ao - bo;
+          return a.key.localeCompare(b.key);
+        }
+        return a.key.localeCompare(b.key);
+      });
+      return rows;
+    }
+
     function renderProfileMapDiff() {
       const compareProfile = String(byId("rfProfileCompare").value || "").trim();
       const diffFilter = String(byId("rfProfileDiffFilter").value || "all").trim();
+      const search = String(byId("rfProfileDiffSearch").value || "").trim().toLowerCase();
+      const sortMode = String(byId("rfProfileDiffSort").value || "key_asc").trim();
       const currentMap = sanitizeActiveBaseMap(activeBaseProfiles[currentBaseProfile] || {});
       const compareMap = compareProfile ? sanitizeActiveBaseMap(activeBaseProfiles[compareProfile] || {}) : {};
+      const tbody = byId("rfProfileDiffTableBody");
+      tbody.innerHTML = "";
 
       if (!compareProfile) {
         byId("rfProfileDiffSummary").textContent = "select compare profile";
@@ -399,31 +461,49 @@ const adminDevicesPageHTML = `<!doctype html>
       lines.push("[profile map diff]");
       lines.push("current=" + currentBaseProfile + " compare=" + compareProfile);
       lines.push("filter=" + diffFilter);
+      lines.push("sort=" + sortMode);
+      lines.push("search=" + (search || "(none)"));
       lines.push("");
       let shown = 0;
       let missingCurrent = 0;
       let missingCompare = 0;
       let valueChanged = 0;
       let totalDiff = 0;
+      const rows = [];
       for (const key of keys) {
         const currentVal = String(currentMap[key] || "");
         const compareVal = String(compareMap[key] || "");
         if (currentVal === compareVal) continue;
         totalDiff++;
-        const currentMissing = currentVal === "";
-        const compareMissing = compareVal === "";
-        if (currentMissing) missingCurrent++;
-        if (compareMissing) missingCompare++;
-        if (!currentMissing && !compareMissing) valueChanged++;
+        const diffType = profileDiffType(currentVal, compareVal);
+        if (diffType === "missing_current") missingCurrent++;
+        else if (diffType === "missing_compare") missingCompare++;
+        else valueChanged++;
 
-        if (diffFilter === "changed" && (currentMissing || compareMissing)) continue;
-        if (diffFilter === "missing_current" && !currentMissing) continue;
-        if (diffFilter === "missing_compare" && !compareMissing) continue;
-
+        if (!includeProfileDiffType(diffType, diffFilter)) continue;
+        if (search) {
+          const hay = (key + "\n" + currentVal + "\n" + compareVal + "\n" + diffType).toLowerCase();
+          if (!hay.includes(search)) continue;
+        }
+        rows.push({ key, type: diffType, current: currentVal, compare: compareVal });
+      }
+      sortProfileDiffRows(rows, sortMode);
+      for (const row of rows) {
         shown++;
-        lines.push(key);
-        lines.push("  current: " + (currentVal || "(none)"));
-        lines.push("  compare: " + (compareVal || "(none)"));
+        const tr = document.createElement("tr");
+        const tdKey = document.createElement("td");
+        tdKey.textContent = row.key;
+        const tdType = document.createElement("td");
+        tdType.textContent = row.type;
+        const tdCurrent = document.createElement("td");
+        tdCurrent.textContent = row.current || "(none)";
+        const tdCompare = document.createElement("td");
+        tdCompare.textContent = row.compare || "(none)";
+        tr.appendChild(tdKey);
+        tr.appendChild(tdType);
+        tr.appendChild(tdCurrent);
+        tr.appendChild(tdCompare);
+        tbody.appendChild(tr);
       }
       if (shown === 0) {
         lines.push("(no entries matched filter)");
@@ -820,6 +900,18 @@ const adminDevicesPageHTML = `<!doctype html>
       } catch (e) { setErr(String(e.message || e)); }
     };
     byId("rfProfileDiffFilter").onchange = () => {
+      try {
+        setErr(""); setOk("");
+        renderProfileMapDiff();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+    byId("rfProfileDiffSort").onchange = () => {
+      try {
+        setErr(""); setOk("");
+        renderProfileMapDiff();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+    byId("rfProfileDiffSearch").oninput = () => {
       try {
         setErr(""); setOk("");
         renderProfileMapDiff();
