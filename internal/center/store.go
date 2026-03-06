@@ -20,6 +20,7 @@ import (
 var (
 	errStoreConflict = errors.New("store conflict")
 	errStoreInvalid  = errors.New("store invalid")
+	errStoreInUse    = errors.New("store in use")
 )
 
 const (
@@ -347,6 +348,97 @@ func (s *deviceStore) approvePolicy(version string, approvedAt time.Time) (Polic
 		return PolicyRecord{}, err
 	}
 	return rec, nil
+}
+
+func (s *deviceStore) putPolicy(rec PolicyRecord, now time.Time) (PolicyRecord, error) {
+	rec.Version = normalizePolicyVersion(rec.Version)
+	rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
+	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+	rec.Note = strings.TrimSpace(rec.Note)
+	if rec.Version == "" || rec.WAFRaw == "" {
+		return PolicyRecord{}, errStoreInvalid
+	}
+	if rec.SHA256 == "" {
+		rec.SHA256 = hashStringHex(rec.WAFRaw)
+	}
+	if rec.SHA256 != hashStringHex(rec.WAFRaw) {
+		return PolicyRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, ok := s.policies[rec.Version]
+	if !ok {
+		rec.Status = policyStatusDraft
+		rec.CreatedAt = now.UTC().Format(time.RFC3339Nano)
+		rec.UpdatedAt = rec.CreatedAt
+		s.policies[rec.Version] = rec
+		if err := s.saveLocked(); err != nil {
+			return PolicyRecord{}, err
+		}
+		return rec, nil
+	}
+
+	if existing.SHA256 == rec.SHA256 && existing.WAFRaw == rec.WAFRaw {
+		if rec.Note != "" && existing.Note == "" {
+			existing.Note = rec.Note
+			existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+			s.policies[rec.Version] = existing
+			if err := s.saveLocked(); err != nil {
+				return PolicyRecord{}, err
+			}
+		}
+		return existing, nil
+	}
+	if s.policyInUseLocked(rec.Version) {
+		return PolicyRecord{}, errStoreInUse
+	}
+
+	existing.WAFRaw = rec.WAFRaw
+	existing.SHA256 = rec.SHA256
+	if rec.Note != "" {
+		existing.Note = rec.Note
+	}
+	existing.Status = policyStatusDraft
+	existing.ApprovedAt = ""
+	existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+	s.policies[rec.Version] = existing
+	if err := s.saveLocked(); err != nil {
+		return PolicyRecord{}, err
+	}
+	return existing, nil
+}
+
+func (s *deviceStore) deletePolicy(version string) error {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, ok := s.policies[version]; !ok {
+		return os.ErrNotExist
+	}
+	if s.policyInUseLocked(version) {
+		return errStoreInUse
+	}
+	delete(s.policies, version)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *deviceStore) policyInUseLocked(version string) bool {
+	for _, rec := range s.devices {
+		if rec.DesiredPolicyVersion == version || rec.CurrentPolicyVersion == version {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool) {

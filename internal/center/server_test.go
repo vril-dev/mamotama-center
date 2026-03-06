@@ -1090,6 +1090,113 @@ func TestDevicePolicyDownload(t *testing.T) {
 	}
 }
 
+func TestPolicyOverwriteAndDeleteUnused(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+	srv.nowFn = func() time.Time { return baseTS }
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-policy-mutate", key, baseTS, "policy-mutate-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	createV1Req := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-inuse-v1","waf_raw":"SecRuleEngine On","note":"inuse"}`))
+	addAdminAPIKey(createV1Req)
+	createV1Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createV1Res, createV1Req)
+	if createV1Res.Code != http.StatusOK {
+		t.Fatalf("create v1 failed: %d body=%s", createV1Res.Code, createV1Res.Body.String())
+	}
+
+	approveV1Req := httptest.NewRequest(http.MethodPost, "/v1/policies/waf-inuse-v1:approve", nil)
+	addAdminAPIKey(approveV1Req)
+	approveV1Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(approveV1Res, approveV1Req)
+	if approveV1Res.Code != http.StatusOK {
+		t.Fatalf("approve v1 failed: %d body=%s", approveV1Res.Code, approveV1Res.Body.String())
+	}
+
+	assignV1Req := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy-mutate:assign-policy", bytes.NewBufferString(`{"version":"waf-inuse-v1"}`))
+	addAdminAPIKey(assignV1Req)
+	assignV1Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignV1Res, assignV1Req)
+	if assignV1Res.Code != http.StatusOK {
+		t.Fatalf("assign v1 failed: %d body=%s", assignV1Res.Code, assignV1Res.Body.String())
+	}
+
+	overwriteInUseReq := httptest.NewRequest(http.MethodPut, "/v1/policies/waf-inuse-v1", bytes.NewBufferString(`{"version":"waf-inuse-v1","waf_raw":"SecRuleEngine DetectionOnly","note":"overwrite"}`))
+	addAdminAPIKey(overwriteInUseReq)
+	overwriteInUseRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(overwriteInUseRes, overwriteInUseReq)
+	if overwriteInUseRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict when overwriting in-use policy, got %d body=%s", overwriteInUseRes.Code, overwriteInUseRes.Body.String())
+	}
+
+	deleteInUseReq := httptest.NewRequest(http.MethodDelete, "/v1/policies/waf-inuse-v1", nil)
+	addAdminAPIKey(deleteInUseReq)
+	deleteInUseRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteInUseRes, deleteInUseReq)
+	if deleteInUseRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict when deleting in-use policy, got %d body=%s", deleteInUseRes.Code, deleteInUseRes.Body.String())
+	}
+
+	createV2Req := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-unused-v1","waf_raw":"SecRuleEngine On","note":"unused"}`))
+	addAdminAPIKey(createV2Req)
+	createV2Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createV2Res, createV2Req)
+	if createV2Res.Code != http.StatusOK {
+		t.Fatalf("create v2 failed: %d body=%s", createV2Res.Code, createV2Res.Body.String())
+	}
+
+	overwriteV2Req := httptest.NewRequest(http.MethodPut, "/v1/policies/waf-unused-v1", bytes.NewBufferString(`{"version":"waf-unused-v1","waf_raw":"SecRuleEngine DetectionOnly","note":"updated"}`))
+	addAdminAPIKey(overwriteV2Req)
+	overwriteV2Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(overwriteV2Res, overwriteV2Req)
+	if overwriteV2Res.Code != http.StatusOK {
+		t.Fatalf("overwrite v2 failed: %d body=%s", overwriteV2Res.Code, overwriteV2Res.Body.String())
+	}
+	var overwriteBody struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(overwriteV2Res.Body.Bytes(), &overwriteBody); err != nil {
+		t.Fatalf("decode overwrite v2 body: %v", err)
+	}
+	if overwriteBody.Policy.Status != "draft" {
+		t.Fatalf("expected draft after overwrite, got status=%q", overwriteBody.Policy.Status)
+	}
+	if !strings.Contains(overwriteBody.Policy.WAFRaw, "DetectionOnly") {
+		t.Fatalf("unexpected overwrite waf_raw: %s", overwriteBody.Policy.WAFRaw)
+	}
+
+	deleteV2Req := httptest.NewRequest(http.MethodDelete, "/v1/policies/waf-unused-v1", nil)
+	addAdminAPIKey(deleteV2Req)
+	deleteV2Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deleteV2Res, deleteV2Req)
+	if deleteV2Res.Code != http.StatusOK {
+		t.Fatalf("delete v2 failed: %d body=%s", deleteV2Res.Code, deleteV2Res.Body.String())
+	}
+
+	getDeletedReq := httptest.NewRequest(http.MethodGet, "/v1/policies/waf-unused-v1", nil)
+	addAdminAPIKey(getDeletedReq)
+	getDeletedRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(getDeletedRes, getDeletedReq)
+	if getDeletedRes.Code != http.StatusNotFound {
+		t.Fatalf("expected not found for deleted policy, got %d body=%s", getDeletedRes.Code, getDeletedRes.Body.String())
+	}
+}
+
 func TestLogsPushStoresCompressedBatch(t *testing.T) {
 	t.Parallel()
 
@@ -1329,6 +1436,16 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 	}
 	if got := uiRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "text/html") {
 		t.Fatalf("unexpected admin logs ui content-type: %s", got)
+	}
+
+	deviceUIReq := httptest.NewRequest(http.MethodGet, "/admin/devices", nil)
+	deviceUIRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deviceUIRes, deviceUIReq)
+	if deviceUIRes.Code != http.StatusOK {
+		t.Fatalf("admin devices ui failed: %d body=%s", deviceUIRes.Code, deviceUIRes.Body.String())
+	}
+	if got := deviceUIRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "text/html") {
+		t.Fatalf("unexpected admin devices ui content-type: %s", got)
 	}
 }
 

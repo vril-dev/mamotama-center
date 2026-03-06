@@ -171,6 +171,7 @@ func (s *Server) routes() {
 		LogSummary:  s.handleAdminLogsSummary,
 		LogDownload: s.handleAdminLogsDownload,
 		LogUI:       s.handleAdminLogsUI,
+		DeviceUI:    s.handleAdminDevicesUI,
 	})
 }
 
@@ -580,35 +581,96 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireAdminRead(w, r) {
+			return
+		}
+		pol, found := s.store.getPolicy(version)
+		if !found {
+			writeError(w, http.StatusNotFound, "policy not found")
+			return
+		}
+		devices := s.store.list()
+		var desired, current int
+		for _, rec := range devices {
+			if rec.DesiredPolicyVersion == pol.Version {
+				desired++
+			}
+			if rec.CurrentPolicyVersion == pol.Version {
+				current++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"policy": pol,
+			"usage": map[string]any{
+				"desired_device_count": desired,
+				"current_device_count": current,
+			},
+		})
+	case http.MethodPut:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		var req policyUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		req.Version = strings.TrimSpace(req.Version)
+		if req.Version != "" && normalizePolicyVersion(req.Version) != version {
+			writeError(w, http.StatusBadRequest, "version in body must match version in path")
+			return
+		}
+		pol, err := s.store.putPolicy(PolicyRecord{
+			Version: version,
+			SHA256:  req.SHA256,
+			WAFRaw:  req.WAFRaw,
+			Note:    req.Note,
+		}, s.nowFn().UTC())
+		if err != nil {
+			switch {
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusUnprocessableEntity, "invalid policy payload")
+			case errors.Is(err, errStoreInUse):
+				writeError(w, http.StatusConflict, "policy is in use and cannot be overwritten")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"policy put failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to put policy")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"policy": pol,
+		})
+	case http.MethodDelete:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		err := s.store.deletePolicy(version)
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				writeError(w, http.StatusNotFound, "policy not found")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusBadRequest, "policy version is invalid")
+			case errors.Is(err, errStoreInUse):
+				writeError(w, http.StatusConflict, "policy is in use and cannot be deleted")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"policy delete failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to delete policy")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"version": version,
+			"deleted": true,
+		})
+	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
 	}
-	if !s.requireAdminRead(w, r) {
-		return
-	}
-	pol, found := s.store.getPolicy(version)
-	if !found {
-		writeError(w, http.StatusNotFound, "policy not found")
-		return
-	}
-	devices := s.store.list()
-	var desired, current int
-	for _, rec := range devices {
-		if rec.DesiredPolicyVersion == pol.Version {
-			desired++
-		}
-		if rec.CurrentPolicyVersion == pol.Version {
-			current++
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"policy": pol,
-		"usage": map[string]any{
-			"desired_device_count": desired,
-			"current_device_count": current,
-		},
-	})
 }
 
 func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {

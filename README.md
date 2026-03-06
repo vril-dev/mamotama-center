@@ -34,6 +34,12 @@ Control plane for mamotama-edge.
 - `GET /v1/policies/{version}`
   - header `X-API-Key` required
   - returns one policy and device usage counters
+- `PUT /v1/policies/{version}`
+  - header `X-API-Key` required
+  - overwrites policy content as `draft` (only when policy is unused)
+- `DELETE /v1/policies/{version}`
+  - header `X-API-Key` required
+  - deletes policy (only when policy is unused)
 - `POST /v1/devices/{device_id}:assign-policy`
   - header `X-API-Key` required
   - sets device desired policy version (approved policy only)
@@ -72,6 +78,8 @@ Control plane for mamotama-edge.
   - downloads filtered logs as NDJSON (`gzip=1` optional)
 - `GET /admin/logs`
   - minimal TLS-only admin page for log device list, summary, query, and download
+- `GET /admin/devices`
+  - minimal TLS-only admin page for device list and policy operations
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
@@ -171,6 +179,8 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - write scope:
   - `POST /v1/policies`
   - `POST /v1/policies/{version}:approve`
+  - `PUT /v1/policies/{version}`
+  - `DELETE /v1/policies/{version}`
   - `POST /v1/devices/{device_id}:assign-policy`
   - `POST /v1/devices/{device_id}:revoke`
   - `POST /v1/devices/{device_id}:retire`
@@ -180,8 +190,10 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 ## Policy Approval Workflow
 
 - new policy by `POST /v1/policies` starts with `status=draft`
+- policy can be adjusted by `PUT /v1/policies/{version}` (unused only), and status becomes `draft`
 - `POST /v1/policies/{version}:approve` moves it to `status=approved`
 - `POST /v1/devices/{device_id}:assign-policy` accepts only `approved` policy
+- unused policy can be deleted by `DELETE /v1/policies/{version}`
 - legacy stored policies without status are treated as `approved` on load
 
 ## Admin Log APIs
