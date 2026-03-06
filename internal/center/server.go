@@ -122,7 +122,18 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	now := s.nowFn().UTC()
 	addr := remoteAddressOnly(r.RemoteAddr)
 	current, exists := s.store.get(req.DeviceID)
+	if existingByFP, ok := s.store.findByFingerprint(fingerprint); ok && existingByFP.DeviceID != req.DeviceID {
+		writeError(w, http.StatusConflict, "public key already bound to another device_id")
+		return
+	}
+
+	rotated := false
 	if exists && current.PublicKeyPEMBase64 != req.PublicKeyPEMBase64 {
+		if !allowKeyRotation(r.Header.Get("X-Allow-Key-Rotation")) {
+			writeError(w, http.StatusConflict, "public key mismatch for existing device_id (set X-Allow-Key-Rotation: true to rotate)")
+			return
+		}
+		rotated = true
 		s.logger.Printf(`{"level":"warn","msg":"public key rotated","device_id":"%s","remote_addr":"%s"}`, req.DeviceID, addr)
 	}
 
@@ -147,6 +158,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"enrolled_at":   saved.EnrolledAt,
 		"fingerprint":   saved.PublicKeyFingerprintSHA256,
 		"already_known": exists,
+		"rotated":       rotated,
 		"device_status": s.buildDeviceStatus(saved, now),
 	})
 }
@@ -363,6 +375,11 @@ func parseRFC3339Any(raw string) (time.Time, bool) {
 		return ts.UTC(), true
 	}
 	return time.Time{}, false
+}
+
+func allowKeyRotation(raw string) bool {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	return raw == "1" || raw == "true" || raw == "yes"
 }
 
 func heartbeatMessage(deviceID, timestamp, nonce, statusHash string) string {

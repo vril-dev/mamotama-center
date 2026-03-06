@@ -12,6 +12,9 @@ Control plane for mamotama-edge.
 - `POST /v1/enroll`
   - header `X-License-Key` required
   - registers `device_id` + edge public key
+  - key rotation is rejected by default for existing `device_id`
+  - set `X-Allow-Key-Rotation: true` to rotate key for existing `device_id`
+  - rejects same public key registration under another `device_id`
 - `POST /v1/heartbeat`
   - verifies Ed25519 signature using enrolled public key
   - applies timestamp skew and replay checks
@@ -72,6 +75,14 @@ device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - `stale`: heartbeat delay exceeded `heartbeat.stale_after`
 
 `degraded` / `offline` / `stale` are returned with `flagged=true`.
+
+## Re-enrollment Guardrails
+
+- Existing `device_id` with different key:
+  - default: `409 Conflict`
+  - allow only with `X-Allow-Key-Rotation: true`
+- Existing public key with another `device_id`:
+  - always `409 Conflict`
 
 ## Build Targets
 

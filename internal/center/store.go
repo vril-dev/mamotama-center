@@ -84,6 +84,17 @@ func (s *deviceStore) list() []DeviceRecord {
 	return devices
 }
 
+func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, rec := range s.devices {
+		if rec.PublicKeyFingerprintSHA256 == fingerprint {
+			return rec, true
+		}
+	}
+	return DeviceRecord{}, false
+}
+
 func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

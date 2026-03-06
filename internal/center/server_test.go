@@ -273,3 +273,170 @@ func TestStatusFromHeartbeatAge(t *testing.T) {
 		})
 	}
 }
+
+func TestEnrollRejectsPublicKeyMismatchWithoutRotationHeader(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	makePayload := func(pubB64, fingerprint string) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"device_id":                     "device-rotate",
+			"public_key_pem_b64":            pubB64,
+			"public_key_fingerprint_sha256": fingerprint,
+		})
+		return b
+	}
+
+	makeKey := func(t *testing.T) (string, string) {
+		t.Helper()
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		der, err := x509.MarshalPKIXPublicKey(pub)
+		if err != nil {
+			t.Fatalf("marshal pub key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+		pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+		fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+		if err != nil {
+			t.Fatalf("validate pub key: %v", err)
+		}
+		return pubB64, fingerprint
+	}
+
+	pub1, fp1 := makeKey(t)
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub1, fp1)))
+	firstReq.Header.Set("X-License-Key", "test-license-key-1234")
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	pub2, fp2 := makeKey(t)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub2, fp2)))
+	secondReq.Header.Set("X-License-Key", "test-license-key-1234")
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict for key mismatch, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+}
+
+func TestEnrollAllowsPublicKeyRotationWithHeader(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	makePayload := func(pubB64, fingerprint string) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"device_id":                     "device-rotate-ok",
+			"public_key_pem_b64":            pubB64,
+			"public_key_fingerprint_sha256": fingerprint,
+		})
+		return b
+	}
+
+	makeKey := func(t *testing.T) (string, string) {
+		t.Helper()
+		pub, _, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("generate key: %v", err)
+		}
+		der, err := x509.MarshalPKIXPublicKey(pub)
+		if err != nil {
+			t.Fatalf("marshal pub key: %v", err)
+		}
+		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+		pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+		fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+		if err != nil {
+			t.Fatalf("validate pub key: %v", err)
+		}
+		return pubB64, fingerprint
+	}
+
+	pub1, fp1 := makeKey(t)
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub1, fp1)))
+	firstReq.Header.Set("X-License-Key", "test-license-key-1234")
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	pub2, fp2 := makeKey(t)
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(makePayload(pub2, fp2)))
+	secondReq.Header.Set("X-License-Key", "test-license-key-1234")
+	secondReq.Header.Set("X-Allow-Key-Rotation", "true")
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusOK {
+		t.Fatalf("expected key rotation success, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+}
+
+func TestEnrollRejectsFingerprintReuseAcrossDeviceIDs(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal pub key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+	if err != nil {
+		t.Fatalf("validate pub key: %v", err)
+	}
+
+	makeReq := func(deviceID string) *http.Request {
+		body, _ := json.Marshal(map[string]any{
+			"device_id":                     deviceID,
+			"public_key_pem_b64":            pubB64,
+			"public_key_fingerprint_sha256": fingerprint,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(body))
+		req.Header.Set("X-License-Key", "test-license-key-1234")
+		return req
+	}
+
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, makeReq("device-a"))
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, makeReq("device-b"))
+	if secondRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict for fingerprint reuse, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+}
