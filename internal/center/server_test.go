@@ -1,6 +1,7 @@
 package center
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
@@ -14,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -197,6 +199,42 @@ func gzipBytes(t *testing.T, raw []byte) []byte {
 		t.Fatalf("gzip close: %v", err)
 	}
 	return buf.Bytes()
+}
+
+func tgzBundleBase64(t *testing.T, files map[string]string) (string, string) {
+	t.Helper()
+	keys := make([]string, 0, len(files))
+	for k := range files {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, name := range keys {
+		body := []byte(files[name])
+		hdr := &tar.Header{
+			Name: name,
+			Mode: 0o644,
+			Size: int64(len(body)),
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar write header %q: %v", name, err)
+		}
+		if _, err := tw.Write(body); err != nil {
+			t.Fatalf("tar write body %q: %v", name, err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	payload := buf.Bytes()
+	return base64.StdEncoding.EncodeToString(payload), hashBytesHex(payload)
 }
 
 func TestEnrollAndHeartbeat(t *testing.T) {
@@ -852,6 +890,10 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 
 	key := newTestDeviceKey(t)
 	baseTS := time.Now().UTC()
+	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
+		"rules/mamotama.conf":                  "SecRuleEngine On\nInclude ./rules/crs/setup.conf\n",
+		"rules/crs/REQUEST-901-INITIALIZATION.conf": "SecRule REQUEST_HEADERS:User-Agent \"@contains test\" \"id:901001,phase:1,pass\"",
+	})
 
 	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-policy", key, baseTS, "policy-enroll-1")))
 	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
@@ -861,7 +903,17 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
 	}
 
-	putPolicyReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-2026-03-06","waf_raw":"{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}","note":"initial"}`))
+	putPolicyBody, err := json.Marshal(map[string]any{
+		"version":         "waf-2026-03-06",
+		"waf_raw":         "{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}",
+		"note":            "initial",
+		"bundle_tgz_b64":  bundleB64,
+		"bundle_sha256":   bundleSHA,
+	})
+	if err != nil {
+		t.Fatalf("marshal policy upsert payload: %v", err)
+	}
+	putPolicyReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewReader(putPolicyBody))
 	addAdminAPIKey(putPolicyReq)
 	putPolicyRes := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(putPolicyRes, putPolicyReq)
@@ -876,6 +928,9 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 	if putBody.Policy.Version != "waf-2026-03-06" || putBody.Policy.SHA256 == "" {
 		t.Fatalf("unexpected policy body: %s", putPolicyRes.Body.String())
+	}
+	if putBody.Policy.BundleSHA256 != bundleSHA || putBody.Policy.BundleTGZB64 == "" {
+		t.Fatalf("expected bundle in policy upsert response: %s", putPolicyRes.Body.String())
 	}
 	if putBody.Policy.Status != "draft" {
 		t.Fatalf("expected draft policy after upsert, got status=%q", putBody.Policy.Status)
@@ -938,8 +993,10 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	var pullBody struct {
 		UpdateRequired bool `json:"update_required"`
 		Policy         struct {
-			Version string `json:"version"`
-			SHA256  string `json:"sha256"`
+			Version      string `json:"version"`
+			SHA256       string `json:"sha256"`
+			BundleTGZB64 string `json:"bundle_tgz_b64"`
+			BundleSHA256 string `json:"bundle_sha256"`
 		} `json:"policy"`
 	}
 	if err := json.Unmarshal(pullRes.Body.Bytes(), &pullBody); err != nil {
@@ -950,6 +1007,9 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 	if pullBody.Policy.Version != "waf-2026-03-06" || pullBody.Policy.SHA256 == "" {
 		t.Fatalf("unexpected pull policy: %s", pullRes.Body.String())
+	}
+	if pullBody.Policy.BundleSHA256 != bundleSHA || pullBody.Policy.BundleTGZB64 == "" {
+		t.Fatalf("expected pull policy bundle fields: %s", pullRes.Body.String())
 	}
 
 	ackReq := httptest.NewRequest(http.MethodPost, "/v1/policy/ack", bytes.NewReader(signedPolicyAckPayload(t, "device-policy", key, baseTS.Add(3*time.Second), "policy-ack-1", pullBody.Policy.Version, pullBody.Policy.SHA256, "applied", "")))

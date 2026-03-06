@@ -108,6 +108,16 @@ const adminDevicesPageHTML = `<!doctype html>
           <input id="note" placeholder="optional note">
         </div>
       </div>
+      <div class="row">
+        <div style="min-width:320px; flex:1;">
+          <label>Bundle (.tar.gz, optional)</label>
+          <input id="bundleFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip">
+        </div>
+        <div style="min-width:320px; flex:1;">
+          <label>Bundle SHA256 (auto)</label>
+          <input id="bundleSHA" readonly>
+        </div>
+      </div>
       <div>
         <label>WAF Raw</label>
         <textarea id="wafRaw" placeholder="SecRuleEngine On"></textarea>
@@ -137,6 +147,8 @@ const adminDevicesPageHTML = `<!doctype html>
     let policiesCache = [];
     let assignedBy = {};
     let appliedBy = {};
+    let bundleB64 = "";
+    let bundleSHA = "";
 
     byId("apiKey").value = localStorage.getItem(keyStore) || "";
     byId("saveKey").onclick = () => localStorage.setItem(keyStore, byId("apiKey").value);
@@ -144,6 +156,15 @@ const adminDevicesPageHTML = `<!doctype html>
     function setErr(msg) { byId("err").textContent = msg || ""; }
     function setOk(msg) { byId("ok").textContent = msg || ""; }
     function setActionOut(v) { byId("actionOut").textContent = typeof v === "string" ? v : JSON.stringify(v, null, 2); }
+    function toHex(u8) { return Array.from(u8).map(b => b.toString(16).padStart(2, "0")).join(""); }
+    function bytesToBase64(bytes) {
+      const chunk = 0x8000;
+      let out = "";
+      for (let i = 0; i < bytes.length; i += chunk) {
+        out += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(out);
+    }
 
     async function api(method, path, body) {
       const key = byId("apiKey").value.trim();
@@ -234,7 +255,12 @@ const adminDevicesPageHTML = `<!doctype html>
     function currentDraftBody(version) {
       const raw = byId("wafRaw").value.trim();
       if (!raw) throw new Error("waf_raw is required");
-      return { version, waf_raw: raw, note: byId("note").value.trim() };
+      const body = { version, waf_raw: raw, note: byId("note").value.trim() };
+      if (bundleB64 && bundleSHA) {
+        body.bundle_tgz_b64 = bundleB64;
+        body.bundle_sha256 = bundleSHA;
+      }
+      return body;
     }
 
     function triggerDownload(url, fileName) {
@@ -261,6 +287,10 @@ const adminDevicesPageHTML = `<!doctype html>
         const p = body.policy || {};
         byId("note").value = p.note || "";
         byId("wafRaw").value = p.waf_raw || "";
+        byId("bundleSHA").value = p.bundle_sha256 || "";
+        bundleB64 = "";
+        bundleSHA = "";
+        byId("bundleFile").value = "";
         selectedPolicy = p.version || version;
         byId("selectedPolicy").textContent = selectedPolicy;
         renderPolicies();
@@ -344,6 +374,26 @@ const adminDevicesPageHTML = `<!doctype html>
         const device = selectedDevice || "";
         if (!device) throw new Error("select device first");
         await triggerDownload("/v1/devices/" + encodeURIComponent(device) + ":download-policy?state=current", device + "-current.waf");
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("bundleFile").onchange = async (ev) => {
+      try {
+        setErr(""); setOk("");
+        const f = (ev.target.files || [])[0];
+        if (!f) {
+          bundleB64 = "";
+          bundleSHA = "";
+          byId("bundleSHA").value = "";
+          return;
+        }
+        const buf = await f.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        bundleSHA = toHex(new Uint8Array(digest));
+        bundleB64 = bytesToBase64(bytes);
+        byId("bundleSHA").value = bundleSHA;
+        setOk("bundle loaded: " + f.name + " (" + bytes.length + " bytes)");
       } catch (e) { setErr(String(e.message || e)); }
     };
 

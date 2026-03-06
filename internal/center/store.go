@@ -1,9 +1,12 @@
 package center
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,14 +40,16 @@ type RevokedKeyRecord struct {
 }
 
 type PolicyRecord struct {
-	Version    string `json:"version"`
-	SHA256     string `json:"sha256"`
-	WAFRaw     string `json:"waf_raw"`
-	Status     string `json:"status"`
-	CreatedAt  string `json:"created_at"`
-	UpdatedAt  string `json:"updated_at,omitempty"`
-	ApprovedAt string `json:"approved_at,omitempty"`
-	Note       string `json:"note,omitempty"`
+	Version      string `json:"version"`
+	SHA256       string `json:"sha256"`
+	WAFRaw       string `json:"waf_raw"`
+	BundleTGZB64 string `json:"bundle_tgz_b64,omitempty"`
+	BundleSHA256 string `json:"bundle_sha256,omitempty"`
+	Status       string `json:"status"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+	ApprovedAt   string `json:"approved_at,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 type DeviceRecord struct {
@@ -214,6 +219,12 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		rec.Version = normalizePolicyVersion(rec.Version)
 		rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
 		rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
+		bundleB64, bundleSHA, err := normalizeAndValidatePolicyBundle(rec.BundleTGZB64, rec.BundleSHA256)
+		if err != nil {
+			continue
+		}
+		rec.BundleTGZB64 = bundleB64
+		rec.BundleSHA256 = bundleSHA
 		if rec.SHA256 == "" && rec.WAFRaw != "" {
 			rec.SHA256 = hashStringHex(rec.WAFRaw)
 		}
@@ -287,6 +298,11 @@ func (s *deviceStore) upsertPolicy(rec PolicyRecord, now time.Time) (PolicyRecor
 	rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
 	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
 	rec.Note = strings.TrimSpace(rec.Note)
+	var err error
+	rec.BundleTGZB64, rec.BundleSHA256, err = normalizeAndValidatePolicyBundle(rec.BundleTGZB64, rec.BundleSHA256)
+	if err != nil {
+		return PolicyRecord{}, errStoreInvalid
+	}
 	if rec.Version == "" || rec.WAFRaw == "" {
 		return PolicyRecord{}, errStoreInvalid
 	}
@@ -302,6 +318,9 @@ func (s *deviceStore) upsertPolicy(rec PolicyRecord, now time.Time) (PolicyRecor
 	existing, ok := s.policies[rec.Version]
 	if ok {
 		if existing.SHA256 == rec.SHA256 && existing.WAFRaw == rec.WAFRaw {
+			if rec.BundleTGZB64 != "" && (existing.BundleSHA256 != rec.BundleSHA256 || existing.BundleTGZB64 != rec.BundleTGZB64) {
+				return PolicyRecord{}, errStoreConflict
+			}
 			if rec.Note != "" && existing.Note == "" {
 				existing.Note = rec.Note
 				existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
@@ -355,6 +374,11 @@ func (s *deviceStore) putPolicy(rec PolicyRecord, now time.Time) (PolicyRecord, 
 	rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
 	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
 	rec.Note = strings.TrimSpace(rec.Note)
+	var err error
+	rec.BundleTGZB64, rec.BundleSHA256, err = normalizeAndValidatePolicyBundle(rec.BundleTGZB64, rec.BundleSHA256)
+	if err != nil {
+		return PolicyRecord{}, errStoreInvalid
+	}
 	if rec.Version == "" || rec.WAFRaw == "" {
 		return PolicyRecord{}, errStoreInvalid
 	}
@@ -380,7 +404,14 @@ func (s *deviceStore) putPolicy(rec PolicyRecord, now time.Time) (PolicyRecord, 
 		return rec, nil
 	}
 
-	if existing.SHA256 == rec.SHA256 && existing.WAFRaw == rec.WAFRaw {
+	nextBundleB64 := rec.BundleTGZB64
+	nextBundleSHA := rec.BundleSHA256
+	if nextBundleB64 == "" && nextBundleSHA == "" {
+		nextBundleB64 = existing.BundleTGZB64
+		nextBundleSHA = existing.BundleSHA256
+	}
+	if existing.SHA256 == rec.SHA256 && existing.WAFRaw == rec.WAFRaw &&
+		existing.BundleSHA256 == nextBundleSHA && existing.BundleTGZB64 == nextBundleB64 {
 		if rec.Note != "" && existing.Note == "" {
 			existing.Note = rec.Note
 			existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
@@ -397,6 +428,8 @@ func (s *deviceStore) putPolicy(rec PolicyRecord, now time.Time) (PolicyRecord, 
 
 	existing.WAFRaw = rec.WAFRaw
 	existing.SHA256 = rec.SHA256
+	existing.BundleTGZB64 = nextBundleB64
+	existing.BundleSHA256 = nextBundleSHA
 	if rec.Note != "" {
 		existing.Note = rec.Note
 	}
@@ -439,6 +472,71 @@ func (s *deviceStore) policyInUseLocked(version string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAndValidatePolicyBundle(rawB64, rawSHA string) (string, string, error) {
+	b64v := strings.TrimSpace(rawB64)
+	shav := strings.ToLower(strings.TrimSpace(rawSHA))
+	if b64v == "" && shav == "" {
+		return "", "", nil
+	}
+	if b64v == "" || shav == "" {
+		return "", "", errStoreInvalid
+	}
+	payload, err := decodeBase64String(b64v)
+	if err != nil || len(payload) == 0 {
+		return "", "", errStoreInvalid
+	}
+	if hashBytesHex(payload) != shav {
+		return "", "", errStoreInvalid
+	}
+	if err := validateTGZArchive(payload); err != nil {
+		return "", "", errStoreInvalid
+	}
+	return b64v, shav, nil
+}
+
+func validateTGZArchive(payload []byte) error {
+	zr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+
+	tr := tar.NewReader(zr)
+	seenRegular := false
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		name := strings.TrimSpace(h.Name)
+		if name == "" {
+			continue
+		}
+		clean := filepath.Clean(name)
+		if clean == "." || strings.HasPrefix(clean, "../") || filepath.IsAbs(clean) {
+			return errStoreInvalid
+		}
+		switch h.Typeflag {
+		case tar.TypeReg, tar.TypeRegA:
+			seenRegular = true
+		case tar.TypeDir:
+		default:
+			return errStoreInvalid
+		}
+	}
+	if !seenRegular {
+		return errStoreInvalid
+	}
+	return nil
+}
+
+func decodeBase64String(raw string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(strings.TrimSpace(raw))
 }
 
 func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool) {

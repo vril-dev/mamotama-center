@@ -67,10 +67,12 @@ type heartbeatRequest struct {
 }
 
 type policyUpsertRequest struct {
-	Version string `json:"version"`
-	SHA256  string `json:"sha256,omitempty"`
-	WAFRaw  string `json:"waf_raw"`
-	Note    string `json:"note,omitempty"`
+	Version      string `json:"version"`
+	SHA256       string `json:"sha256,omitempty"`
+	WAFRaw       string `json:"waf_raw"`
+	BundleTGZB64 string `json:"bundle_tgz_b64,omitempty"`
+	BundleSHA256 string `json:"bundle_sha256,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 
 type policyAssignRequest struct {
@@ -519,10 +521,12 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 		}
 		now := s.nowFn().UTC()
 		pol, err := s.store.upsertPolicy(PolicyRecord{
-			Version: req.Version,
-			SHA256:  req.SHA256,
-			WAFRaw:  req.WAFRaw,
-			Note:    req.Note,
+			Version:      req.Version,
+			SHA256:       req.SHA256,
+			WAFRaw:       req.WAFRaw,
+			BundleTGZB64: req.BundleTGZB64,
+			BundleSHA256: req.BundleSHA256,
+			Note:         req.Note,
 		}, now)
 		if err != nil {
 			switch {
@@ -623,10 +627,12 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		pol, err := s.store.putPolicy(PolicyRecord{
-			Version: version,
-			SHA256:  req.SHA256,
-			WAFRaw:  req.WAFRaw,
-			Note:    req.Note,
+			Version:      version,
+			SHA256:       req.SHA256,
+			WAFRaw:       req.WAFRaw,
+			BundleTGZB64: req.BundleTGZB64,
+			BundleSHA256: req.BundleSHA256,
+			Note:         req.Note,
 		}, s.nowFn().UTC())
 		if err != nil {
 			switch {
@@ -744,14 +750,16 @@ func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {
 		"device_id":       rec.DeviceID,
 		"update_required": true,
 		"policy": map[string]any{
-			"version":      pol.Version,
-			"sha256":       pol.SHA256,
-			"waf_raw":      pol.WAFRaw,
-			"note":         pol.Note,
-			"created_at":   pol.CreatedAt,
-			"updated_at":   pol.UpdatedAt,
-			"assigned_at":  rec.DesiredPolicyAssignedAt,
-			"current_seen": rec.CurrentPolicyVersion,
+			"version":         pol.Version,
+			"sha256":          pol.SHA256,
+			"waf_raw":         pol.WAFRaw,
+			"bundle_tgz_b64":  pol.BundleTGZB64,
+			"bundle_sha256":   pol.BundleSHA256,
+			"note":            pol.Note,
+			"created_at":      pol.CreatedAt,
+			"updated_at":      pol.UpdatedAt,
+			"assigned_at":     rec.DesiredPolicyAssignedAt,
+			"current_seen":    rec.CurrentPolicyVersion,
 		},
 		"device_status": s.buildDeviceStatus(rec, now),
 	})
@@ -1250,14 +1258,16 @@ func (s *Server) handleDownloadDevicePolicy(w http.ResponseWriter, r *http.Reque
 			"device_id": deviceID,
 			"state":     state,
 			"policy": map[string]any{
-				"version":      pol.Version,
-				"sha256":       pol.SHA256,
-				"waf_raw":      pol.WAFRaw,
-				"note":         pol.Note,
-				"created_at":   pol.CreatedAt,
-				"updated_at":   pol.UpdatedAt,
-				"assigned_at":  rec.DesiredPolicyAssignedAt,
-				"last_sync_at": rec.LastPolicySyncAt,
+				"version":        pol.Version,
+				"sha256":         pol.SHA256,
+				"waf_raw":        pol.WAFRaw,
+				"bundle_tgz_b64": pol.BundleTGZB64,
+				"bundle_sha256":  pol.BundleSHA256,
+				"note":           pol.Note,
+				"created_at":     pol.CreatedAt,
+				"updated_at":     pol.UpdatedAt,
+				"assigned_at":    rec.DesiredPolicyAssignedAt,
+				"last_sync_at":   rec.LastPolicySyncAt,
 			},
 		})
 		return
@@ -1273,6 +1283,9 @@ func (s *Server) handleDownloadDevicePolicy(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
 	w.Header().Set("X-Policy-Version", pol.Version)
 	w.Header().Set("X-Policy-SHA256", pol.SHA256)
+	if pol.BundleSHA256 != "" {
+		w.Header().Set("X-Policy-Bundle-SHA256", pol.BundleSHA256)
+	}
 	w.Header().Set("X-Policy-State", state)
 	if assignedAt != "" {
 		w.Header().Set("X-Policy-Assigned-At", assignedAt)

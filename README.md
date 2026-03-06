@@ -27,7 +27,7 @@ Control plane for mamotama-edge.
   - lists policy versions and desired/current usage summary
 - `POST /v1/policies`
   - header `X-API-Key` required
-  - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `note`) as `draft`
+  - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `bundle_tgz_b64`, `bundle_sha256`, `note`) as `draft`
 - `POST /v1/policies/{version}:approve`
   - header `X-API-Key` required
   - marks policy status as `approved` (required before assignment)
@@ -36,7 +36,7 @@ Control plane for mamotama-edge.
   - returns one policy and device usage counters
 - `PUT /v1/policies/{version}`
   - header `X-API-Key` required
-  - overwrites policy content as `draft` (only when policy is unused)
+  - overwrites policy content as `draft` (only when policy is unused, optional bundle update)
 - `DELETE /v1/policies/{version}`
   - header `X-API-Key` required
   - deletes policy (only when policy is unused)
@@ -47,7 +47,7 @@ Control plane for mamotama-edge.
   - header `X-API-Key` required
   - downloads device policy rule (`state=desired|current`, `format=raw|json`)
 - `POST /v1/policy/pull`
-  - signed edge request to fetch assigned policy when update is required
+  - signed edge request to fetch assigned policy when update is required (`waf_raw` + optional bundle payload)
 - `POST /v1/policy/ack`
   - signed edge request to report `applied|failed|rolled_back`
 - `POST /v1/logs/push`
