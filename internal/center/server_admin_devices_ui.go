@@ -43,6 +43,7 @@ const adminDevicesPageHTML = `<!doctype html>
     .error { color:var(--err); font-size:12px; white-space:pre-wrap; }
     .ok { color:#166534; font-size:12px; white-space:pre-wrap; }
     .mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+    pre.box { margin:0; padding:8px; border:1px solid var(--line); border-radius:8px; background:#fbfcff; min-height:120px; overflow:auto; font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
   </style>
 </head>
 <body>
@@ -149,6 +150,33 @@ const adminDevicesPageHTML = `<!doctype html>
       </div>
       <div id="actionOut" class="mono"></div>
     </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>Rule Files Diff (Selected Device)</h2>
+      <div class="row">
+        <span class="muted">current: <span id="rfCurrentVersion" class="mono">-</span></span>
+        <span class="muted">desired: <span id="rfDesiredVersion" class="mono">-</span></span>
+        <span class="muted">target(edit): <span id="rfTargetVersion" class="mono">-</span></span>
+      </div>
+      <div class="grid">
+        <div>
+          <label>Current rule_files</label>
+          <pre id="rfCurrent" class="box"></pre>
+        </div>
+        <div>
+          <label>Desired rule_files</label>
+          <pre id="rfDesired" class="box"></pre>
+        </div>
+        <div>
+          <label>Target(edit) rule_files</label>
+          <pre id="rfTarget" class="box"></pre>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Diff Summary</label>
+        <pre id="rfDiffSummary" class="box"></pre>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -205,6 +233,7 @@ const adminDevicesPageHTML = `<!doctype html>
           selectedDevice = d.device_id || "";
           byId("selectedDevice").textContent = selectedDevice || "-";
           renderDevices();
+          renderRuleFilesDiff();
         };
         tbody.appendChild(tr);
       }
@@ -224,6 +253,7 @@ const adminDevicesPageHTML = `<!doctype html>
           byId("selectedPolicy").textContent = selectedPolicy || "-";
           byId("version").value = selectedPolicy;
           renderPolicies();
+          renderRuleFilesDiff();
         };
         tbody.appendChild(tr);
       }
@@ -237,6 +267,7 @@ const adminDevicesPageHTML = `<!doctype html>
         byId("selectedDevice").textContent = selectedDevice || "-";
       }
       renderDevices();
+      renderRuleFilesDiff();
       setActionOut(body);
     }
 
@@ -251,6 +282,7 @@ const adminDevicesPageHTML = `<!doctype html>
         byId("version").value = selectedPolicy;
       }
       renderPolicies();
+      renderRuleFilesDiff();
       setActionOut(body);
     }
 
@@ -297,6 +329,93 @@ const adminDevicesPageHTML = `<!doctype html>
       }
     }
 
+    function uniq(arr) {
+      const seen = new Set();
+      const out = [];
+      for (const v of arr || []) {
+        const s = String(v || "").trim();
+        if (!s || seen.has(s)) continue;
+        seen.add(s);
+        out.push(s);
+      }
+      return out;
+    }
+
+    function parsePolicyRuleFiles(policy) {
+      if (!policy || !policy.waf_raw) return { files: [], error: "" };
+      try {
+        const obj = JSON.parse(String(policy.waf_raw));
+        if (!obj || !Array.isArray(obj.rule_files)) return { files: [], error: "" };
+        return { files: uniq(obj.rule_files), error: "" };
+      } catch {
+        return { files: [], error: "waf_raw is not JSON" };
+      }
+    }
+
+    function findPolicy(version) {
+      const v = String(version || "").trim();
+      if (!v) return null;
+      return (policiesCache || []).find(p => (p.version || "") === v) || null;
+    }
+
+    function selectedDeviceRecord() {
+      const id = String(selectedDevice || "").trim();
+      if (!id) return null;
+      return (devicesCache || []).find(d => (d.device_id || "") === id) || null;
+    }
+
+    function diffRuleFiles(base, next) {
+      const baseSet = new Set(base || []);
+      const nextSet = new Set(next || []);
+      const added = [];
+      const removed = [];
+      for (const v of nextSet) if (!baseSet.has(v)) added.push(v);
+      for (const v of baseSet) if (!nextSet.has(v)) removed.push(v);
+      return { added, removed };
+    }
+
+    function fmtRuleFiles(files, parseError) {
+      const rows = [];
+      if (parseError) rows.push("# " + parseError);
+      if (!files || files.length === 0) rows.push("(none)");
+      else rows.push(...files);
+      return rows.join("\n");
+    }
+
+    function renderRuleFilesDiff() {
+      const dev = selectedDeviceRecord();
+      const currentVersion = (dev && dev.current_policy_version) || "";
+      const desiredVersion = (dev && dev.desired_policy_version) || "";
+      const targetVersion = byId("version").value.trim() || selectedPolicy || "";
+
+      const currentPolicy = findPolicy(currentVersion);
+      const desiredPolicy = findPolicy(desiredVersion);
+      const targetPolicy = findPolicy(targetVersion);
+
+      const currentParsed = parsePolicyRuleFiles(currentPolicy);
+      const desiredParsed = parsePolicyRuleFiles(desiredPolicy);
+      const targetParsed = parsePolicyRuleFiles(targetPolicy);
+
+      byId("rfCurrentVersion").textContent = currentVersion || "-";
+      byId("rfDesiredVersion").textContent = desiredVersion || "-";
+      byId("rfTargetVersion").textContent = targetVersion || "-";
+      byId("rfCurrent").textContent = fmtRuleFiles(currentParsed.files, currentParsed.error);
+      byId("rfDesired").textContent = fmtRuleFiles(desiredParsed.files, desiredParsed.error);
+      byId("rfTarget").textContent = fmtRuleFiles(targetParsed.files, targetParsed.error);
+
+      const d1 = diffRuleFiles(currentParsed.files, desiredParsed.files);
+      const d2 = diffRuleFiles(currentParsed.files, targetParsed.files);
+      const lines = [];
+      lines.push("[current -> desired]");
+      lines.push("add: " + (d1.added.length ? d1.added.join(", ") : "(none)"));
+      lines.push("remove: " + (d1.removed.length ? d1.removed.join(", ") : "(none)"));
+      lines.push("");
+      lines.push("[current -> target(edit)]");
+      lines.push("add: " + (d2.added.length ? d2.added.join(", ") : "(none)"));
+      lines.push("remove: " + (d2.removed.length ? d2.removed.join(", ") : "(none)"));
+      byId("rfDiffSummary").textContent = lines.join("\n");
+    }
+
     function triggerDownload(url, fileName) {
       return fetch(url, { headers: { "X-API-Key": byId("apiKey").value.trim() } })
         .then(r => { if (!r.ok) return r.text().then(t => Promise.reject(new Error(t || ("HTTP " + r.status)))); return r.blob(); })
@@ -330,6 +449,7 @@ const adminDevicesPageHTML = `<!doctype html>
         selectedPolicy = p.version || version;
         byId("selectedPolicy").textContent = selectedPolicy;
         renderPolicies();
+        renderRuleFilesDiff();
         setActionOut(body);
       } catch (e) { setErr(String(e.message || e)); }
     };
@@ -342,6 +462,7 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("created/updated draft: " + version);
         setActionOut(body);
         await loadPolicies();
+        renderRuleFilesDiff();
       } catch (e) { setErr(String(e.message || e)); }
     };
 
@@ -353,6 +474,7 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("overwritten as draft: " + version);
         setActionOut(body);
         await loadPolicies();
+        renderRuleFilesDiff();
       } catch (e) { setErr(String(e.message || e)); }
     };
 
@@ -364,6 +486,7 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("approved: " + version);
         setActionOut(body);
         await loadPolicies();
+        renderRuleFilesDiff();
       } catch (e) { setErr(String(e.message || e)); }
     };
 
@@ -379,6 +502,7 @@ const adminDevicesPageHTML = `<!doctype html>
           byId("selectedPolicy").textContent = "-";
         }
         await loadPolicies();
+        renderRuleFilesDiff();
       } catch (e) { setErr(String(e.message || e)); }
     };
 
@@ -392,6 +516,7 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("assigned policy " + version + " to " + device);
         setActionOut(body);
         await loadDevices();
+        renderRuleFilesDiff();
       } catch (e) { setErr(String(e.message || e)); }
     };
 
@@ -439,6 +564,8 @@ const adminDevicesPageHTML = `<!doctype html>
         setOk("bundle loaded: " + f.name + " (" + bytes.length + " bytes, conf=" + ((bundle.conf_count|0)) + ")");
       } catch (e) { setErr(String(e.message || e)); }
     };
+
+    byId("version").oninput = () => renderRuleFilesDiff();
 
     refreshAll().catch(e => setErr(String(e.message || e)));
   </script>
