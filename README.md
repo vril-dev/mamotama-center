@@ -22,6 +22,9 @@ Control plane for mamotama-edge.
   - returns device list with status flags
 - `GET /v1/devices/{device_id}`
   - returns one device with status flags
+- `POST /v1/devices/{device_id}:retire`
+  - header `X-License-Key` required
+  - marks a device as retired (heartbeat is rejected after retire)
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
@@ -73,8 +76,9 @@ device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - `degraded`: heartbeat delay is over expected interval but below offline threshold
 - `offline`: heartbeat delay exceeded `expected_interval * missed_heartbeats_for_offline`
 - `stale`: heartbeat delay exceeded `heartbeat.stale_after`
+- `retired`: device was retired via admin API
 
-`degraded` / `offline` / `stale` are returned with `flagged=true`.
+`degraded` / `offline` / `stale` / `retired` are returned with `flagged=true`.
 
 ## Re-enrollment Guardrails
 
@@ -83,6 +87,9 @@ device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
   - allow only with `X-Allow-Key-Rotation: true`
 - Existing public key with another `device_id`:
   - always `409 Conflict`
+- Re-enroll for retired `device_id`:
+  - allowed with valid license key
+  - response includes `reactivated=true`
 
 ## Build Targets
 

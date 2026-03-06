@@ -22,6 +22,8 @@ type DeviceRecord struct {
 	LastHeartbeatMessageAt     string `json:"last_heartbeat_message_at,omitempty"`
 	LastHeartbeatNonce         string `json:"last_heartbeat_nonce,omitempty"`
 	LastHeartbeatStatusHash    string `json:"last_heartbeat_status_hash,omitempty"`
+	RetiredAt                  string `json:"retired_at,omitempty"`
+	RetireReason               string `json:"retire_reason,omitempty"`
 }
 
 type storedDevices struct {
@@ -101,6 +103,10 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 	prev, ok := s.devices[rec.DeviceID]
 	if ok {
 		rec.FirstSeenAt = prev.FirstSeenAt
+		rec.LastHeartbeatAt = prev.LastHeartbeatAt
+		rec.LastHeartbeatMessageAt = prev.LastHeartbeatMessageAt
+		rec.LastHeartbeatNonce = prev.LastHeartbeatNonce
+		rec.LastHeartbeatStatusHash = prev.LastHeartbeatStatusHash
 	}
 	s.devices[rec.DeviceID] = rec
 	if err := s.saveLocked(); err != nil {
@@ -122,6 +128,23 @@ func (s *deviceStore) updateHeartbeat(deviceID string, receivedAt time.Time, mes
 	rec.LastHeartbeatNonce = nonce
 	rec.LastHeartbeatStatusHash = statusHash
 	rec.LastSeenAt = rec.LastHeartbeatAt
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) retire(deviceID string, retiredAt time.Time, reason string) (DeviceRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+	rec.RetiredAt = retiredAt.UTC().Format(time.RFC3339Nano)
+	rec.RetireReason = reason
 	s.devices[deviceID] = rec
 	if err := s.saveLocked(); err != nil {
 		return DeviceRecord{}, err

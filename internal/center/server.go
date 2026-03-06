@@ -9,10 +9,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +43,10 @@ type heartbeatRequest struct {
 	Nonce        string `json:"nonce"`
 	StatusHash   string `json:"status_hash,omitempty"`
 	SignatureB64 string `json:"signature_b64"`
+}
+
+type retireRequest struct {
+	Reason string `json:"reason,omitempty"`
 }
 
 type deviceStatusView struct {
@@ -128,6 +135,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rotated := false
+	reactivated := exists && strings.TrimSpace(current.RetiredAt) != ""
 	if exists && current.PublicKeyPEMBase64 != req.PublicKeyPEMBase64 {
 		if !allowKeyRotation(r.Header.Get("X-Allow-Key-Rotation")) {
 			writeError(w, http.StatusConflict, "public key mismatch for existing device_id (set X-Allow-Key-Rotation: true to rotate)")
@@ -159,6 +167,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"fingerprint":   saved.PublicKeyFingerprintSHA256,
 		"already_known": exists,
 		"rotated":       rotated,
+		"reactivated":   reactivated,
 		"device_status": s.buildDeviceStatus(saved, now),
 	})
 }
@@ -187,6 +196,10 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	rec, ok := s.store.get(req.DeviceID)
 	if !ok {
 		writeError(w, http.StatusNotFound, "device is not enrolled")
+		return
+	}
+	if strings.TrimSpace(rec.RetiredAt) != "" {
+		writeError(w, http.StatusGone, "device is retired")
 		return
 	}
 
@@ -260,6 +273,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 		"degraded": 0,
 		"offline":  0,
 		"stale":    0,
+		"retired":  0,
 		"flagged":  0,
 	}
 	for _, rec := range items {
@@ -284,14 +298,17 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	deviceID, action, ok := parseDevicePath(r.URL.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "device_id is required in path")
 		return
 	}
-	deviceID := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
-	deviceID = strings.TrimSpace(deviceID)
-	if deviceID == "" {
-		writeError(w, http.StatusBadRequest, "device_id is required in path")
+	if action == "retire" {
+		s.handleRetireDevice(w, r, deviceID)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	rec, ok := s.store.get(deviceID)
@@ -304,7 +321,74 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleRetireDevice(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid license key")
+		return
+	}
+
+	req := retireRequest{}
+	if r.Body != nil {
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if len(req.Reason) > 256 {
+		writeError(w, http.StatusBadRequest, "reason must be 256 chars or less")
+		return
+	}
+
+	now := s.nowFn().UTC()
+	rec, err := s.store.retire(deviceID, now, req.Reason)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist retire failed","device_id":"%s","error":"%s"}`, deviceID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist retire state")
+		return
+	}
+	s.logger.Printf(`{"level":"info","msg":"device retired","device_id":"%s"}`, deviceID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":        "ok",
+		"device_id":     rec.DeviceID,
+		"retired_at":    rec.RetiredAt,
+		"retire_reason": rec.RetireReason,
+		"device_status": s.buildDeviceStatus(rec, now),
+	})
+}
+
 func (s *Server) buildDeviceStatus(rec DeviceRecord, now time.Time) deviceStatusView {
+	if strings.TrimSpace(rec.RetiredAt) != "" {
+		lastSeenRef := strings.TrimSpace(rec.LastHeartbeatAt)
+		if lastSeenRef == "" {
+			lastSeenRef = rec.EnrolledAt
+		}
+		lastSeenTime, ok := parseRFC3339Any(lastSeenRef)
+		if !ok {
+			lastSeenTime = now
+		}
+		secondsSince := int64(now.Sub(lastSeenTime).Seconds())
+		if secondsSince < 0 {
+			secondsSince = 0
+		}
+		return deviceStatusView{
+			DeviceRecord:         rec,
+			Status:               "retired",
+			Flagged:              true,
+			HasHeartbeat:         strings.TrimSpace(rec.LastHeartbeatAt) != "",
+			SecondsSinceLastSeen: secondsSince,
+		}
+	}
+
 	lastSeenRef := strings.TrimSpace(rec.LastHeartbeatAt)
 	hasHeartbeat := lastSeenRef != ""
 	if !hasHeartbeat {
@@ -380,6 +464,24 @@ func parseRFC3339Any(raw string) (time.Time, bool) {
 func allowKeyRotation(raw string) bool {
 	raw = strings.TrimSpace(strings.ToLower(raw))
 	return raw == "1" || raw == "true" || raw == "yes"
+}
+
+func parseDevicePath(path string) (deviceID string, action string, ok bool) {
+	deviceID = strings.TrimSpace(strings.TrimPrefix(path, "/v1/devices/"))
+	if deviceID == "" {
+		return "", "", false
+	}
+	if strings.Contains(deviceID, "/") {
+		return "", "", false
+	}
+	if strings.HasSuffix(deviceID, ":retire") {
+		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":retire"))
+		if deviceID == "" {
+			return "", "", false
+		}
+		return deviceID, "retire", true
+	}
+	return deviceID, "", true
 }
 
 func heartbeatMessage(deviceID, timestamp, nonce, statusHash string) string {

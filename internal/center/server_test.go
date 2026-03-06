@@ -440,3 +440,204 @@ func TestEnrollRejectsFingerprintReuseAcrossDeviceIDs(t *testing.T) {
 		t.Fatalf("expected conflict for fingerprint reuse, got %d body=%s", secondRes.Code, secondRes.Body.String())
 	}
 }
+
+func TestRetireDeviceBlocksHeartbeat(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal pub key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+	if err != nil {
+		t.Fatalf("validate pub key: %v", err)
+	}
+
+	enrollReqBody, _ := json.Marshal(map[string]any{
+		"device_id":                     "device-retire",
+		"public_key_pem_b64":            pubB64,
+		"public_key_fingerprint_sha256": fingerprint,
+	})
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	retireReqBody, _ := json.Marshal(map[string]any{"reason": "maintenance"})
+	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-retire:retire", bytes.NewReader(retireReqBody))
+	retireReq.Header.Set("X-License-Key", "test-license-key-1234")
+	retireRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retireRes, retireReq)
+	if retireRes.Code != http.StatusOK {
+		t.Fatalf("unexpected retire status: %d body=%s", retireRes.Code, retireRes.Body.String())
+	}
+
+	var retireBody struct {
+		DeviceStatus struct {
+			Status  string `json:"status"`
+			Flagged bool   `json:"flagged"`
+		} `json:"device_status"`
+	}
+	if err := json.Unmarshal(retireRes.Body.Bytes(), &retireBody); err != nil {
+		t.Fatalf("decode retire body: %v", err)
+	}
+	if retireBody.DeviceStatus.Status != "retired" || !retireBody.DeviceStatus.Flagged {
+		t.Fatalf("unexpected retire status body: %s", retireRes.Body.String())
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	nonce := "nonce-after-retire"
+	message := heartbeatMessage("device-retire", ts, nonce, "")
+	signature := ed25519.Sign(priv, []byte(message))
+	heartbeatBody, _ := json.Marshal(map[string]any{
+		"device_id":     "device-retire",
+		"timestamp":     ts,
+		"nonce":         nonce,
+		"signature_b64": base64.StdEncoding.EncodeToString(signature),
+	})
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(heartbeatBody))
+	heartbeatRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(heartbeatRes, heartbeatReq)
+	if heartbeatRes.Code != http.StatusGone {
+		t.Fatalf("expected retired heartbeat to be rejected, got %d body=%s", heartbeatRes.Code, heartbeatRes.Body.String())
+	}
+}
+
+func TestRetireRequiresValidLicense(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal pub key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+	if err != nil {
+		t.Fatalf("validate pub key: %v", err)
+	}
+
+	enrollReqBody, _ := json.Marshal(map[string]any{
+		"device_id":                     "device-retire-auth",
+		"public_key_pem_b64":            pubB64,
+		"public_key_fingerprint_sha256": fingerprint,
+	})
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-retire-auth:retire", bytes.NewReader([]byte(`{}`)))
+	retireRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retireRes, retireReq)
+	if retireRes.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d body=%s", retireRes.Code, retireRes.Body.String())
+	}
+}
+
+func TestReEnrollReactivatesRetiredDevice(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	cfg.Auth.EnrollmentLicenseKeys = []string{"test-license-key-1234"}
+	cfg.Storage.Path = filepath.Join(t.TempDir(), "devices.json")
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(pub)
+	if err != nil {
+		t.Fatalf("marshal pub key: %v", err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	pubB64 := base64.StdEncoding.EncodeToString(pemBytes)
+	fingerprint, err := validatePublicKeyPEMBase64(pubB64)
+	if err != nil {
+		t.Fatalf("validate pub key: %v", err)
+	}
+
+	enrollPayload := map[string]any{
+		"device_id":                     "device-reactivate",
+		"public_key_pem_b64":            pubB64,
+		"public_key_fingerprint_sha256": fingerprint,
+	}
+	enrollReqBody, _ := json.Marshal(enrollPayload)
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	retireReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-reactivate:retire", bytes.NewReader([]byte(`{"reason":"test"}`)))
+	retireReq.Header.Set("X-License-Key", "test-license-key-1234")
+	retireRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(retireRes, retireReq)
+	if retireRes.Code != http.StatusOK {
+		t.Fatalf("unexpected retire status: %d body=%s", retireRes.Code, retireRes.Body.String())
+	}
+
+	reenrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(enrollReqBody))
+	reenrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	reenrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(reenrollRes, reenrollReq)
+	if reenrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected re-enroll status: %d body=%s", reenrollRes.Code, reenrollRes.Body.String())
+	}
+	var reenrollBody struct {
+		Reactivated bool `json:"reactivated"`
+		DeviceState struct {
+			Status string `json:"status"`
+		} `json:"device_status"`
+	}
+	if err := json.Unmarshal(reenrollRes.Body.Bytes(), &reenrollBody); err != nil {
+		t.Fatalf("decode re-enroll body: %v", err)
+	}
+	if !reenrollBody.Reactivated {
+		t.Fatalf("expected reactivated=true, body=%s", reenrollRes.Body.String())
+	}
+	if reenrollBody.DeviceState.Status == "retired" {
+		t.Fatalf("expected non-retired status after re-enroll, body=%s", reenrollRes.Body.String())
+	}
+}
