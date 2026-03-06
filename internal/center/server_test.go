@@ -28,7 +28,11 @@ type testDeviceKey struct {
 	KeyID        string
 }
 
-const testAdminAPIKey = "test-admin-api-key-1234"
+const (
+	testAdminAPIKey      = "test-admin-api-key-1234"
+	testAdminReadAPIKey  = "test-admin-read-api-key-1234"
+	testAdminWriteAPIKey = "test-admin-write-api-key-1234"
+)
 
 func newSignedTestConfig(t *testing.T) Config {
 	t.Helper()
@@ -41,7 +45,11 @@ func newSignedTestConfig(t *testing.T) Config {
 }
 
 func addAdminAPIKey(req *http.Request) {
-	req.Header.Set("X-API-Key", testAdminAPIKey)
+	addAdminAPIKeyWithValue(req, testAdminAPIKey)
+}
+
+func addAdminAPIKeyWithValue(req *http.Request, key string) {
+	req.Header.Set("X-API-Key", key)
 }
 
 func newTestDeviceKey(t *testing.T) testDeviceKey {
@@ -240,7 +248,7 @@ func TestHeartbeatRejectsReplay(t *testing.T) {
 	t.Parallel()
 
 	cfg := newSignedTestConfig(t)
-	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	cfg.Heartbeat.MaxClockSkew.Duration = 24 * time.Hour
 
 	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
 	if err != nil {
@@ -869,6 +877,34 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	if putBody.Policy.Version != "waf-2026-03-06" || putBody.Policy.SHA256 == "" {
 		t.Fatalf("unexpected policy body: %s", putPolicyRes.Body.String())
 	}
+	if putBody.Policy.Status != "draft" {
+		t.Fatalf("expected draft policy after upsert, got status=%q", putBody.Policy.Status)
+	}
+
+	assignDraftReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
+	addAdminAPIKey(assignDraftReq)
+	assignDraftRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignDraftRes, assignDraftReq)
+	if assignDraftRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict while policy is draft, got %d body=%s", assignDraftRes.Code, assignDraftRes.Body.String())
+	}
+
+	approveReq := httptest.NewRequest(http.MethodPost, "/v1/policies/waf-2026-03-06:approve", nil)
+	addAdminAPIKey(approveReq)
+	approveRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(approveRes, approveReq)
+	if approveRes.Code != http.StatusOK {
+		t.Fatalf("approve policy failed: %d body=%s", approveRes.Code, approveRes.Body.String())
+	}
+	var approveBody struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(approveRes.Body.Bytes(), &approveBody); err != nil {
+		t.Fatalf("decode approve policy body: %v", err)
+	}
+	if approveBody.Policy.Status != "approved" {
+		t.Fatalf("expected approved policy after approve endpoint, got status=%q", approveBody.Policy.Status)
+	}
 
 	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
 	addAdminAPIKey(assignReq)
@@ -949,7 +985,8 @@ func TestDevicePolicyDownload(t *testing.T) {
 	}
 
 	key := newTestDeviceKey(t)
-	baseTS := time.Date(2026, 3, 6, 12, 0, 0, 0, time.UTC)
+	baseTS := time.Now().UTC()
+	srv.nowFn = func() time.Time { return baseTS }
 	srv.nowFn = func() time.Time { return baseTS }
 
 	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-policy-download", key, baseTS, "policy-download-enroll-1")))
@@ -972,6 +1009,14 @@ func TestDevicePolicyDownload(t *testing.T) {
 	}
 	if err := json.Unmarshal(putPolicyRes.Body.Bytes(), &putBody); err != nil {
 		t.Fatalf("decode policy upsert body: %v", err)
+	}
+
+	approveReq := httptest.NewRequest(http.MethodPost, "/v1/policies/waf-2026-03-06:approve", nil)
+	addAdminAPIKey(approveReq)
+	approveRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(approveRes, approveReq)
+	if approveRes.Code != http.StatusOK {
+		t.Fatalf("approve policy failed: %d body=%s", approveRes.Code, approveRes.Body.String())
 	}
 
 	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy-download:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
@@ -1142,6 +1187,43 @@ func TestAdminLogsSummaryValidation(t *testing.T) {
 	srv.Handler().ServeHTTP(notFoundRes, notFoundReq)
 	if notFoundRes.Code != http.StatusNotFound {
 		t.Fatalf("expected not found for unknown device, got %d body=%s", notFoundRes.Code, notFoundRes.Body.String())
+	}
+}
+
+func TestAdminAPIKeyScopes(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Auth.AdminAPIKeys = nil
+	cfg.Auth.AdminReadAPIKeys = []string{testAdminReadAPIKey}
+	cfg.Auth.AdminWriteAPIKeys = []string{testAdminWriteAPIKey}
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	listReadReq := httptest.NewRequest(http.MethodGet, "/v1/policies", nil)
+	addAdminAPIKeyWithValue(listReadReq, testAdminReadAPIKey)
+	listReadRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(listReadRes, listReadReq)
+	if listReadRes.Code != http.StatusOK {
+		t.Fatalf("read key should access GET /v1/policies, got %d body=%s", listReadRes.Code, listReadRes.Body.String())
+	}
+
+	putReadReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"scope-test-v1","waf_raw":"SecRuleEngine On"}`))
+	addAdminAPIKeyWithValue(putReadReq, testAdminReadAPIKey)
+	putReadRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putReadRes, putReadReq)
+	if putReadRes.Code != http.StatusForbidden {
+		t.Fatalf("read key should be forbidden for write endpoint, got %d body=%s", putReadRes.Code, putReadRes.Body.String())
+	}
+
+	putWriteReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"scope-test-v1","waf_raw":"SecRuleEngine On"}`))
+	addAdminAPIKeyWithValue(putWriteReq, testAdminWriteAPIKey)
+	putWriteRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putWriteRes, putWriteReq)
+	if putWriteRes.Code != http.StatusOK {
+		t.Fatalf("write key should access write endpoint, got %d body=%s", putWriteRes.Code, putWriteRes.Body.String())
 	}
 }
 

@@ -19,8 +19,7 @@ func (s *Server) handleAdminLogDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	items, err := s.store.listLogDevices()
@@ -53,8 +52,7 @@ func (s *Server) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	deviceID, opts, err := parseAdminLogQuery(r)
@@ -91,8 +89,7 @@ func (s *Server) handleAdminLogsSummary(w http.ResponseWriter, r *http.Request) 
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	opts, err := parseAdminLogSummaryQuery(r)
@@ -137,8 +134,7 @@ func (s *Server) handleAdminLogsDownload(w http.ResponseWriter, r *http.Request)
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	deviceID, opts, err := parseAdminLogQuery(r)

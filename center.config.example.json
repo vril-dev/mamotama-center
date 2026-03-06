@@ -11,8 +11,11 @@
     "enrollment_license_keys": [
       "replace-with-strong-license-key-001"
     ],
-    "admin_api_keys": [
-      "replace-with-strong-admin-api-key-001"
+    "admin_read_api_keys": [
+      "replace-with-strong-admin-read-api-key-001"
+    ],
+    "admin_write_api_keys": [
+      "replace-with-strong-admin-write-api-key-001"
     ],
     "require_tls": true,
     "trust_forwarded_proto": false,

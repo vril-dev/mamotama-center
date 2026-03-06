@@ -22,6 +22,11 @@ var (
 	errStoreInvalid  = errors.New("store invalid")
 )
 
+const (
+	policyStatusDraft    = "draft"
+	policyStatusApproved = "approved"
+)
+
 type RevokedKeyRecord struct {
 	KeyID                      string `json:"key_id"`
 	PublicKeyPEMBase64         string `json:"public_key_pem_b64"`
@@ -31,12 +36,14 @@ type RevokedKeyRecord struct {
 }
 
 type PolicyRecord struct {
-	Version   string `json:"version"`
-	SHA256    string `json:"sha256"`
-	WAFRaw    string `json:"waf_raw"`
-	CreatedAt string `json:"created_at"`
-	UpdatedAt string `json:"updated_at,omitempty"`
-	Note      string `json:"note,omitempty"`
+	Version    string `json:"version"`
+	SHA256     string `json:"sha256"`
+	WAFRaw     string `json:"waf_raw"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
+	ApprovedAt string `json:"approved_at,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 type DeviceRecord struct {
@@ -209,6 +216,19 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		if rec.SHA256 == "" && rec.WAFRaw != "" {
 			rec.SHA256 = hashStringHex(rec.WAFRaw)
 		}
+		rec.Status = strings.ToLower(strings.TrimSpace(rec.Status))
+		switch rec.Status {
+		case "":
+			// Backward compatibility: policies created before approval workflow
+			// are treated as approved.
+			rec.Status = policyStatusApproved
+			if rec.ApprovedAt == "" {
+				rec.ApprovedAt = rec.CreatedAt
+			}
+		case policyStatusDraft, policyStatusApproved:
+		default:
+			continue
+		}
 		if rec.Version == "" || rec.WAFRaw == "" || rec.SHA256 == "" {
 			continue
 		}
@@ -293,9 +313,36 @@ func (s *deviceStore) upsertPolicy(rec PolicyRecord, now time.Time) (PolicyRecor
 		}
 		return PolicyRecord{}, errStoreConflict
 	}
+	rec.Status = policyStatusDraft
 	rec.CreatedAt = now.UTC().Format(time.RFC3339Nano)
 	rec.UpdatedAt = rec.CreatedAt
 	s.policies[rec.Version] = rec
+	if err := s.saveLocked(); err != nil {
+		return PolicyRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) approvePolicy(version string, approvedAt time.Time) (PolicyRecord, error) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return PolicyRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.policies[version]
+	if !ok {
+		return PolicyRecord{}, os.ErrNotExist
+	}
+	if rec.Status == policyStatusApproved {
+		return rec, nil
+	}
+	rec.Status = policyStatusApproved
+	rec.ApprovedAt = approvedAt.UTC().Format(time.RFC3339Nano)
+	rec.UpdatedAt = rec.ApprovedAt
+	s.policies[version] = rec
 	if err := s.saveLocked(); err != nil {
 		return PolicyRecord{}, err
 	}
@@ -406,6 +453,9 @@ func (s *deviceStore) assignDesiredPolicy(deviceID, version string, assignedAt t
 	pol, ok := s.policies[version]
 	if !ok {
 		return DeviceRecord{}, PolicyRecord{}, os.ErrNotExist
+	}
+	if pol.Status != policyStatusApproved {
+		return DeviceRecord{}, PolicyRecord{}, errStoreConflict
 	}
 	rec.DesiredPolicyVersion = pol.Version
 	rec.DesiredPolicySHA256 = pol.SHA256

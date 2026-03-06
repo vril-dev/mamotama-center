@@ -27,13 +27,16 @@ Control plane for mamotama-edge.
   - lists policy versions and desired/current usage summary
 - `POST /v1/policies`
   - header `X-API-Key` required
-  - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `note`)
+  - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `note`) as `draft`
+- `POST /v1/policies/{version}:approve`
+  - header `X-API-Key` required
+  - marks policy status as `approved` (required before assignment)
 - `GET /v1/policies/{version}`
   - header `X-API-Key` required
   - returns one policy and device usage counters
 - `POST /v1/devices/{device_id}:assign-policy`
   - header `X-API-Key` required
-  - sets device desired policy version
+  - sets device desired policy version (approved policy only)
 - `GET /v1/devices/{device_id}:download-policy`
   - header `X-API-Key` required
   - downloads device policy rule (`state=desired|current`, `format=raw|json`)
@@ -82,7 +85,9 @@ cp center.config.example.json center.config.json
 
 2. Edit `center.config.json`:
 - set `auth.enrollment_license_keys` (16+ chars, one or more keys)
-- set `auth.admin_api_keys` (16+ chars, one or more keys for center operator APIs)
+- set `auth.admin_read_api_keys` (16+ chars, read/download/list APIs)
+- set `auth.admin_write_api_keys` (16+ chars, write/mutate APIs)
+- optional backward compatibility: `auth.admin_api_keys` (treated as write key)
 - keep `auth.require_tls=true` for production
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
@@ -155,6 +160,29 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 - pruning order:
   - remove files older than `storage.log_retention`
   - then, if total remaining size exceeds `storage.log_max_bytes`, remove oldest files first (latest batch is kept)
+
+## Admin API Key Scopes
+
+- read scope:
+  - `GET /v1/policies`, `GET /v1/policies/{version}`
+  - `GET /v1/devices`, `GET /v1/devices/{device_id}`
+  - `GET /v1/admin/logs/*`
+  - `GET /v1/devices/{device_id}:download-policy`
+- write scope:
+  - `POST /v1/policies`
+  - `POST /v1/policies/{version}:approve`
+  - `POST /v1/devices/{device_id}:assign-policy`
+  - `POST /v1/devices/{device_id}:revoke`
+  - `POST /v1/devices/{device_id}:retire`
+
+`auth.admin_api_keys` remains supported and is treated as write scope.
+
+## Policy Approval Workflow
+
+- new policy by `POST /v1/policies` starts with `status=draft`
+- `POST /v1/policies/{version}:approve` moves it to `status=approved`
+- `POST /v1/devices/{device_id}:assign-policy` accepts only `approved` policy
+- legacy stored policies without status are treated as `approved` on load
 
 ## Admin Log APIs
 

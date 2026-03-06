@@ -482,12 +482,11 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
+		if !s.requireAdminRead(w, r) {
+			return
+		}
 		policies := s.store.listPolicies()
 		devices := s.store.list()
 		assigned := make(map[string]int, len(policies))
@@ -509,6 +508,9 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case http.MethodPost:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
 		var req policyUpsertRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
@@ -543,20 +545,46 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	version, action, ok := parsePolicyVersionPath(r.URL.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "policy version is required in path")
+		return
+	}
+	if action == "approve" {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		pol, err := s.store.approvePolicy(version, s.nowFn().UTC())
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				writeError(w, http.StatusNotFound, "policy not found")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusBadRequest, "policy version is invalid")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"policy approve failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to approve policy")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"policy": pol,
+		})
+		return
+	}
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !s.ensureSecureTransport(w, r) {
-		return
-	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
-		return
-	}
-	version, ok := parsePolicyVersionPath(r.URL.Path)
-	if !ok {
-		writeError(w, http.StatusBadRequest, "policy version is required in path")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	pol, found := s.store.getPolicy(version)
@@ -643,6 +671,10 @@ func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {
 	pol, found := s.store.getPolicy(rec.DesiredPolicyVersion)
 	if !found {
 		writeError(w, http.StatusConflict, "assigned policy is missing")
+		return
+	}
+	if pol.Status != policyStatusApproved {
+		writeError(w, http.StatusConflict, "assigned policy is not approved")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -869,8 +901,7 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 
@@ -918,24 +949,35 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	if !s.ensureSecureTransport(w, r) {
 		return
 	}
-	if !s.hasValidAdminAPIKey(r.Header.Get("X-API-Key")) {
-		writeError(w, http.StatusUnauthorized, "invalid admin api key")
-		return
-	}
 	if action == "retire" {
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
 		s.handleRetireDevice(w, r, deviceID)
 		return
 	}
 	if action == "revoke" {
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
 		s.handleRevokeDeviceKey(w, r, deviceID)
 		return
 	}
 	if action == "assign-policy" {
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
 		s.handleAssignDesiredPolicy(w, r, deviceID)
 		return
 	}
 	if action == "download-policy" {
+		if !s.requireAdminRead(w, r) {
+			return
+		}
 		s.handleDownloadDevicePolicy(w, r, deviceID)
+		return
+	}
+	if !s.requireAdminRead(w, r) {
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -1061,6 +1103,10 @@ func (s *Server) handleAssignDesiredPolicy(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, errStoreInvalid) {
 			writeError(w, http.StatusBadRequest, "version is invalid")
+			return
+		}
+		if errors.Is(err, errStoreConflict) {
+			writeError(w, http.StatusConflict, "policy must be approved before assignment")
 			return
 		}
 		if errors.Is(err, os.ErrNotExist) {
@@ -1410,16 +1456,23 @@ func logsPushBodyCanonical(req logsPushRequest) string {
 	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + strconv.Itoa(req.EntryCount) + "\n" + req.ContentSHA256 + "\n" + req.ContentEncoding
 }
 
-func parsePolicyVersionPath(path string) (string, bool) {
-	version := strings.TrimSpace(strings.TrimPrefix(path, "/v1/policies/"))
+func parsePolicyVersionPath(path string) (version string, action string, ok bool) {
+	version = strings.TrimSpace(strings.TrimPrefix(path, "/v1/policies/"))
 	if version == "" || strings.Contains(version, "/") {
-		return "", false
+		return "", "", false
+	}
+	if strings.HasSuffix(version, ":approve") {
+		version = normalizePolicyVersion(strings.TrimSuffix(version, ":approve"))
+		if version == "" {
+			return "", "", false
+		}
+		return version, "approve", true
 	}
 	version = normalizePolicyVersion(version)
 	if version == "" {
-		return "", false
+		return "", "", false
 	}
-	return version, true
+	return version, "", true
 }
 
 func hashStringHex(raw string) string {
@@ -1588,13 +1641,78 @@ func (s *Server) hasValidLicense(got string) bool {
 	return false
 }
 
-func (s *Server) hasValidAdminAPIKey(got string) bool {
+func (s *Server) requireAdminRead(w http.ResponseWriter, r *http.Request) bool {
+	if s.hasValidAdminReadAPIKey(r.Header.Get("X-API-Key")) {
+		return true
+	}
+	writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	return false
+}
+
+func (s *Server) requireAdminWrite(w http.ResponseWriter, r *http.Request) bool {
+	got := strings.TrimSpace(r.Header.Get("X-API-Key"))
+	if s.hasValidAdminWriteAPIKey(got) {
+		return true
+	}
+	if s.hasAnyAdminAPIKey(got) {
+		writeError(w, http.StatusForbidden, "admin api key is read-only")
+		return false
+	}
+	writeError(w, http.StatusUnauthorized, "invalid admin api key")
+	return false
+}
+
+func (s *Server) hasValidAdminReadAPIKey(got string) bool {
 	got = strings.TrimSpace(got)
 	if got == "" {
 		return false
 	}
-	for _, key := range s.cfg.Auth.AdminAPIKeys {
-		if subtle.ConstantTimeCompare([]byte(got), []byte(key)) == 1 {
+	if keyInListConstantTime(got, s.cfg.Auth.AdminReadAPIKeys) {
+		return true
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminWriteAPIKeys) {
+		return true
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminAPIKeys) {
+		return true
+	}
+	return false
+}
+
+func (s *Server) hasValidAdminWriteAPIKey(got string) bool {
+	got = strings.TrimSpace(got)
+	if got == "" {
+		return false
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminWriteAPIKeys) {
+		return true
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminAPIKeys) {
+		return true
+	}
+	return false
+}
+
+func (s *Server) hasAnyAdminAPIKey(got string) bool {
+	got = strings.TrimSpace(got)
+	if got == "" {
+		return false
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminReadAPIKeys) {
+		return true
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminWriteAPIKeys) {
+		return true
+	}
+	if keyInListConstantTime(got, s.cfg.Auth.AdminAPIKeys) {
+		return true
+	}
+	return false
+}
+
+func keyInListConstantTime(got string, keys []string) bool {
+	for _, key := range keys {
+		if subtle.ConstantTimeCompare([]byte(got), []byte(strings.TrimSpace(key))) == 1 {
 			return true
 		}
 	}
