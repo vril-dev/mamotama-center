@@ -33,7 +33,10 @@ type StorageConfig struct {
 }
 
 type HeartbeatConfig struct {
-	MaxClockSkew Duration `json:"max_clock_skew"`
+	MaxClockSkew               Duration `json:"max_clock_skew"`
+	ExpectedInterval           Duration `json:"expected_interval"`
+	MissedHeartbeatsForOffline int      `json:"missed_heartbeats_for_offline"`
+	StaleAfter                 Duration `json:"stale_after"`
 }
 
 func defaultConfig() Config {
@@ -53,7 +56,10 @@ func defaultConfig() Config {
 			Path: "./center-data/devices.json",
 		},
 		Heartbeat: HeartbeatConfig{
-			MaxClockSkew: Duration{Duration: 5 * time.Minute},
+			MaxClockSkew:               Duration{Duration: 5 * time.Minute},
+			ExpectedInterval:           Duration{Duration: 1 * time.Minute},
+			MissedHeartbeatsForOffline: 3,
+			StaleAfter:                 Duration{Duration: 30 * 24 * time.Hour},
 		},
 	}
 }
@@ -108,6 +114,15 @@ func validate(cfg Config) error {
 	}
 	if cfg.Heartbeat.MaxClockSkew.Duration <= 0 {
 		return fmt.Errorf("heartbeat.max_clock_skew must be positive")
+	}
+	if cfg.Heartbeat.ExpectedInterval.Duration <= 0 {
+		return fmt.Errorf("heartbeat.expected_interval must be positive")
+	}
+	if cfg.Heartbeat.MissedHeartbeatsForOffline < 2 {
+		return fmt.Errorf("heartbeat.missed_heartbeats_for_offline must be >= 2")
+	}
+	if cfg.Heartbeat.StaleAfter.Duration <= cfg.Heartbeat.ExpectedInterval.Duration {
+		return fmt.Errorf("heartbeat.stale_after must be greater than heartbeat.expected_interval")
 	}
 	return nil
 }

@@ -16,6 +16,9 @@
     "path": "./center-data/devices.json"
   },
   "heartbeat": {
-    "max_clock_skew": "5m"
+    "max_clock_skew": "5m",
+    "expected_interval": "1m",
+    "missed_heartbeats_for_offline": 3,
+    "stale_after": "720h"
   }
 }

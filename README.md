@@ -15,6 +15,10 @@ Control plane for mamotama-edge.
 - `POST /v1/heartbeat`
   - verifies Ed25519 signature using enrolled public key
   - applies timestamp skew and replay checks
+- `GET /v1/devices`
+  - returns device list with status flags
+- `GET /v1/devices/{device_id}`
+  - returns one device with status flags
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
@@ -30,6 +34,9 @@ cp center.config.example.json center.config.json
 - set `auth.enrollment_license_keys` (16+ chars, one or more keys)
 - set `storage.path` (persistent file path)
 - optional: tune `heartbeat.max_clock_skew`
+- optional: tune `heartbeat.expected_interval`
+- optional: tune `heartbeat.missed_heartbeats_for_offline`
+- optional: tune `heartbeat.stale_after`
 
 3. Build and run:
 
@@ -53,6 +60,18 @@ device_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
 ```
 
 `signature_b64` is Base64(Ed25519 signature bytes).
+
+## Device Status Flags
+
+`GET /v1/devices` computes status by heartbeat age:
+
+- `pending`: enrolled but no heartbeat yet (within offline threshold)
+- `online`: heartbeat is within `heartbeat.expected_interval`
+- `degraded`: heartbeat delay is over expected interval but below offline threshold
+- `offline`: heartbeat delay exceeded `expected_interval * missed_heartbeats_for_offline`
+- `stale`: heartbeat delay exceeded `heartbeat.stale_after`
+
+`degraded` / `offline` / `stale` are returned with `flagged=true`.
 
 ## Build Targets
 

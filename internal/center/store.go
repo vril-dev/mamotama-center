@@ -71,6 +71,19 @@ func (s *deviceStore) get(deviceID string) (DeviceRecord, bool) {
 	return rec, ok
 }
 
+func (s *deviceStore) list() []DeviceRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	devices := make([]DeviceRecord, 0, len(s.devices))
+	for _, rec := range s.devices {
+		devices = append(devices, rec)
+	}
+	sort.Slice(devices, func(i, j int) bool {
+		return devices[i].DeviceID < devices[j].DeviceID
+	})
+	return devices
+}
+
 func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

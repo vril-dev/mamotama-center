@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -41,6 +42,14 @@ type heartbeatRequest struct {
 	SignatureB64 string `json:"signature_b64"`
 }
 
+type deviceStatusView struct {
+	DeviceRecord
+	Status               string `json:"status"`
+	Flagged              bool   `json:"flagged"`
+	HasHeartbeat         bool   `json:"has_heartbeat"`
+	SecondsSinceLastSeen int64  `json:"seconds_since_last_seen"`
+}
+
 func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 	store, err := loadDeviceStore(cfg.Storage.Path)
 	if err != nil {
@@ -65,6 +74,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/v1/enroll", s.handleEnroll)
 	s.mux.HandleFunc("/v1/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("/v1/devices", s.handleDevices)
+	s.mux.HandleFunc("/v1/devices/", s.handleDevice)
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -136,6 +147,7 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		"enrolled_at":   saved.EnrolledAt,
 		"fingerprint":   saved.PublicKeyFingerprintSHA256,
 		"already_known": exists,
+		"device_status": s.buildDeviceStatus(saved, now),
 	})
 }
 
@@ -215,7 +227,142 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"status":            "ok",
 		"device_id":         saved.DeviceID,
 		"last_heartbeat_at": saved.LastHeartbeatAt,
+		"device_status":     s.buildDeviceStatus(saved, now),
 	})
+}
+
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	now := s.nowFn().UTC()
+	items := s.store.list()
+	statusFilter := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("status")))
+	out := make([]deviceStatusView, 0, len(items))
+	summary := map[string]int{
+		"total":    0,
+		"pending":  0,
+		"online":   0,
+		"degraded": 0,
+		"offline":  0,
+		"stale":    0,
+		"flagged":  0,
+	}
+	for _, rec := range items {
+		view := s.buildDeviceStatus(rec, now)
+		if statusFilter != "" && view.Status != statusFilter {
+			continue
+		}
+		out = append(out, view)
+		summary["total"]++
+		if _, ok := summary[view.Status]; ok {
+			summary[view.Status]++
+		}
+		if view.Flagged {
+			summary["flagged"]++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"devices":  out,
+		"summary":  summary,
+		"filtered": statusFilter,
+	})
+}
+
+func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	deviceID := strings.TrimPrefix(r.URL.Path, "/v1/devices/")
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" {
+		writeError(w, http.StatusBadRequest, "device_id is required in path")
+		return
+	}
+	rec, ok := s.store.get(deviceID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "device not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"device": s.buildDeviceStatus(rec, s.nowFn().UTC()),
+	})
+}
+
+func (s *Server) buildDeviceStatus(rec DeviceRecord, now time.Time) deviceStatusView {
+	lastSeenRef := strings.TrimSpace(rec.LastHeartbeatAt)
+	hasHeartbeat := lastSeenRef != ""
+	if !hasHeartbeat {
+		lastSeenRef = rec.EnrolledAt
+	}
+	lastSeenTime, ok := parseRFC3339Any(lastSeenRef)
+	if !ok {
+		lastSeenTime = now
+	}
+	secondsSince := int64(now.Sub(lastSeenTime).Seconds())
+	if secondsSince < 0 {
+		secondsSince = 0
+	}
+
+	status, flagged := statusFromHeartbeatAge(
+		hasHeartbeat,
+		now.Sub(lastSeenTime),
+		s.cfg.Heartbeat.ExpectedInterval.Duration,
+		s.cfg.Heartbeat.MissedHeartbeatsForOffline,
+		s.cfg.Heartbeat.StaleAfter.Duration,
+	)
+	return deviceStatusView{
+		DeviceRecord:         rec,
+		Status:               status,
+		Flagged:              flagged,
+		HasHeartbeat:         hasHeartbeat,
+		SecondsSinceLastSeen: secondsSince,
+	}
+}
+
+func statusFromHeartbeatAge(hasHeartbeat bool, age time.Duration, interval time.Duration, missedForOffline int, staleAfter time.Duration) (string, bool) {
+	if age < 0 {
+		age = 0
+	}
+	offlineAfter := interval * time.Duration(missedForOffline)
+
+	if !hasHeartbeat {
+		if age <= offlineAfter {
+			return "pending", false
+		}
+		if age <= staleAfter {
+			return "offline", true
+		}
+		return "stale", true
+	}
+
+	if age <= interval {
+		return "online", false
+	}
+	if age <= offlineAfter {
+		return "degraded", true
+	}
+	if age <= staleAfter {
+		return "offline", true
+	}
+	return "stale", true
+}
+
+func parseRFC3339Any(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return ts.UTC(), true
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts.UTC(), true
+	}
+	return time.Time{}, false
 }
 
 func heartbeatMessage(deviceID, timestamp, nonce, statusHash string) string {
@@ -301,5 +448,6 @@ func writeError(w http.ResponseWriter, code int, message string) {
 	writeJSON(w, code, map[string]any{
 		"status": "error",
 		"error":  message,
+		"code":   strconv.Itoa(code),
 	})
 }
