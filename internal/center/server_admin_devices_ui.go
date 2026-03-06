@@ -117,10 +117,17 @@ const adminDevicesPageHTML = `<!doctype html>
           <label>Bundle SHA256 (auto)</label>
           <input id="bundleSHA" readonly>
         </div>
+        <div style="min-width:260px; flex:1;">
+          <label>WAF Raw Template (optional)</label>
+          <select id="wafTemplate">
+            <option value="">(none)</option>
+            <option value="bundle_default">bundle_default</option>
+          </select>
+        </div>
       </div>
       <div>
         <label>WAF Raw</label>
-        <textarea id="wafRaw" placeholder="SecRuleEngine On"></textarea>
+        <textarea id="wafRaw" placeholder='{"enabled":true,"rule_files":["${MAMOTAMA_POLICY_ACTIVE}/rules/mamotama.conf"]}'></textarea>
       </div>
       <div class="row" style="margin-top:8px;">
         <button id="loadPolicy">Load Policy</button>
@@ -254,8 +261,12 @@ const adminDevicesPageHTML = `<!doctype html>
 
     function currentDraftBody(version) {
       const raw = byId("wafRaw").value.trim();
-      if (!raw) throw new Error("waf_raw is required");
-      const body = { version, waf_raw: raw, note: byId("note").value.trim() };
+      const template = byId("wafTemplate").value.trim();
+      if (!raw && !template) throw new Error("waf_raw or waf_raw_template is required");
+      if (raw && template) throw new Error("set either waf_raw or waf_raw_template, not both");
+      const body = { version, note: byId("note").value.trim() };
+      if (raw) body.waf_raw = raw;
+      if (template) body.waf_raw_template = template;
       if (bundleB64 && bundleSHA) {
         body.bundle_tgz_b64 = bundleB64;
         body.bundle_sha256 = bundleSHA;
@@ -287,6 +298,7 @@ const adminDevicesPageHTML = `<!doctype html>
         const p = body.policy || {};
         byId("note").value = p.note || "";
         byId("wafRaw").value = p.waf_raw || "";
+        byId("wafTemplate").value = "";
         byId("bundleSHA").value = p.bundle_sha256 || "";
         bundleB64 = "";
         bundleSHA = "";
@@ -393,6 +405,9 @@ const adminDevicesPageHTML = `<!doctype html>
         bundleSHA = toHex(new Uint8Array(digest));
         bundleB64 = bytesToBase64(bytes);
         byId("bundleSHA").value = bundleSHA;
+        if (!byId("wafRaw").value.trim() && !byId("wafTemplate").value) {
+          byId("wafTemplate").value = "bundle_default";
+        }
         setOk("bundle loaded: " + f.name + " (" + bytes.length + " bytes)");
       } catch (e) { setErr(String(e.message || e)); }
     };

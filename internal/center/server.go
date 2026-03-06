@@ -1,6 +1,7 @@
 package center
 
 import (
+	"archive/tar"
 	"bytes"
 	"compress/gzip"
 	"crypto/ed25519"
@@ -18,6 +19,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,12 +71,13 @@ type heartbeatRequest struct {
 }
 
 type policyUpsertRequest struct {
-	Version      string `json:"version"`
-	SHA256       string `json:"sha256,omitempty"`
-	WAFRaw       string `json:"waf_raw"`
-	BundleTGZB64 string `json:"bundle_tgz_b64,omitempty"`
-	BundleSHA256 string `json:"bundle_sha256,omitempty"`
-	Note         string `json:"note,omitempty"`
+	Version        string `json:"version"`
+	SHA256         string `json:"sha256,omitempty"`
+	WAFRaw         string `json:"waf_raw,omitempty"`
+	WAFRawTemplate string `json:"waf_raw_template,omitempty"`
+	BundleTGZB64   string `json:"bundle_tgz_b64,omitempty"`
+	BundleSHA256   string `json:"bundle_sha256,omitempty"`
+	Note           string `json:"note,omitempty"`
 }
 
 type policyAssignRequest struct {
@@ -519,11 +524,16 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid json payload")
 			return
 		}
+		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, req.BundleTGZB64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		now := s.nowFn().UTC()
 		pol, err := s.store.upsertPolicy(PolicyRecord{
 			Version:      req.Version,
 			SHA256:       req.SHA256,
-			WAFRaw:       req.WAFRaw,
+			WAFRaw:       wafRaw,
 			BundleTGZB64: req.BundleTGZB64,
 			BundleSHA256: req.BundleSHA256,
 			Note:         req.Note,
@@ -626,10 +636,21 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "version in body must match version in path")
 			return
 		}
+		templateBundleB64 := req.BundleTGZB64
+		if strings.TrimSpace(templateBundleB64) == "" && strings.TrimSpace(req.WAFRawTemplate) != "" {
+			if existing, ok := s.store.getPolicy(version); ok {
+				templateBundleB64 = existing.BundleTGZB64
+			}
+		}
+		wafRaw, err := resolvePolicyWAFRaw(req.WAFRaw, req.WAFRawTemplate, templateBundleB64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		pol, err := s.store.putPolicy(PolicyRecord{
 			Version:      version,
 			SHA256:       req.SHA256,
-			WAFRaw:       req.WAFRaw,
+			WAFRaw:       wafRaw,
 			BundleTGZB64: req.BundleTGZB64,
 			BundleSHA256: req.BundleSHA256,
 			Note:         req.Note,
@@ -750,16 +771,16 @@ func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {
 		"device_id":       rec.DeviceID,
 		"update_required": true,
 		"policy": map[string]any{
-			"version":         pol.Version,
-			"sha256":          pol.SHA256,
-			"waf_raw":         pol.WAFRaw,
-			"bundle_tgz_b64":  pol.BundleTGZB64,
-			"bundle_sha256":   pol.BundleSHA256,
-			"note":            pol.Note,
-			"created_at":      pol.CreatedAt,
-			"updated_at":      pol.UpdatedAt,
-			"assigned_at":     rec.DesiredPolicyAssignedAt,
-			"current_seen":    rec.CurrentPolicyVersion,
+			"version":        pol.Version,
+			"sha256":         pol.SHA256,
+			"waf_raw":        pol.WAFRaw,
+			"bundle_tgz_b64": pol.BundleTGZB64,
+			"bundle_sha256":  pol.BundleSHA256,
+			"note":           pol.Note,
+			"created_at":     pol.CreatedAt,
+			"updated_at":     pol.UpdatedAt,
+			"assigned_at":    rec.DesiredPolicyAssignedAt,
+			"current_seen":   rec.CurrentPolicyVersion,
 		},
 		"device_status": s.buildDeviceStatus(rec, now),
 	})
@@ -1548,6 +1569,105 @@ func parsePolicyVersionPath(path string) (version string, action string, ok bool
 		return "", "", false
 	}
 	return version, "", true
+}
+
+func resolvePolicyWAFRaw(raw string, template string, bundleTGZB64 string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	template = strings.ToLower(strings.TrimSpace(template))
+	if raw != "" && template != "" {
+		return "", fmt.Errorf("waf_raw and waf_raw_template are mutually exclusive")
+	}
+	if raw != "" {
+		return raw, nil
+	}
+	if template == "" {
+		return "", nil
+	}
+	switch template {
+	case "bundle_default":
+		ruleFile, err := defaultBundleRuleFile(bundleTGZB64)
+		if err != nil {
+			return "", err
+		}
+		out, err := json.Marshal(map[string]any{
+			"enabled":    true,
+			"rule_files": []string{"${MAMOTAMA_POLICY_ACTIVE}/" + ruleFile},
+		})
+		if err != nil {
+			return "", fmt.Errorf("marshal generated waf_raw: %w", err)
+		}
+		return string(out), nil
+	default:
+		return "", fmt.Errorf("unsupported waf_raw_template")
+	}
+}
+
+func defaultBundleRuleFile(bundleTGZB64 string) (string, error) {
+	bundleTGZB64 = strings.TrimSpace(bundleTGZB64)
+	if bundleTGZB64 == "" {
+		return "", fmt.Errorf("bundle_tgz_b64 is required when waf_raw_template=bundle_default")
+	}
+	raw, err := base64.StdEncoding.DecodeString(bundleTGZB64)
+	if err != nil {
+		return "", fmt.Errorf("decode bundle_tgz_b64: %w", err)
+	}
+	if len(raw) == 0 {
+		return "", fmt.Errorf("decoded bundle is empty")
+	}
+
+	zr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return "", fmt.Errorf("open bundle gzip: %w", err)
+	}
+	defer zr.Close()
+
+	tr := tar.NewReader(zr)
+	confFiles := make([]string, 0, 8)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", fmt.Errorf("read bundle tar: %w", err)
+		}
+		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
+			continue
+		}
+		name, ok := normalizeBundleEntryPath(hdr.Name)
+		if !ok {
+			continue
+		}
+		if strings.HasSuffix(strings.ToLower(name), ".conf") {
+			confFiles = append(confFiles, name)
+		}
+	}
+	if len(confFiles) == 0 {
+		return "", fmt.Errorf("bundle does not contain any .conf file")
+	}
+	sort.Strings(confFiles)
+	for _, candidate := range confFiles {
+		if candidate == "rules/mamotama.conf" {
+			return candidate, nil
+		}
+	}
+	return confFiles[0], nil
+}
+
+func normalizeBundleEntryPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	clean := path.Clean(strings.ReplaceAll(raw, "\\", "/"))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", false
+	}
+	local := filepath.Clean(filepath.FromSlash(clean))
+	if local == "." || local == ".." || strings.HasPrefix(local, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return strings.TrimPrefix(filepath.ToSlash(local), "./"), true
 }
 
 func hashStringHex(raw string) string {

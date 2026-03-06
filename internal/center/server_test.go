@@ -891,7 +891,7 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	key := newTestDeviceKey(t)
 	baseTS := time.Now().UTC()
 	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
-		"rules/mamotama.conf":                  "SecRuleEngine On\nInclude ./rules/crs/setup.conf\n",
+		"rules/mamotama.conf":                       "SecRuleEngine On\nInclude ./rules/crs/setup.conf\n",
 		"rules/crs/REQUEST-901-INITIALIZATION.conf": "SecRule REQUEST_HEADERS:User-Agent \"@contains test\" \"id:901001,phase:1,pass\"",
 	})
 
@@ -904,11 +904,11 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	}
 
 	putPolicyBody, err := json.Marshal(map[string]any{
-		"version":         "waf-2026-03-06",
-		"waf_raw":         "{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}",
-		"note":            "initial",
-		"bundle_tgz_b64":  bundleB64,
-		"bundle_sha256":   bundleSHA,
+		"version":        "waf-2026-03-06",
+		"waf_raw":        "{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}",
+		"note":           "initial",
+		"bundle_tgz_b64": bundleB64,
+		"bundle_sha256":  bundleSHA,
 	})
 	if err != nil {
 		t.Fatalf("marshal policy upsert payload: %v", err)
@@ -1031,6 +1031,116 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	policyInfo, _ = hbBody["policy"].(map[string]any)
 	if updateRequired, _ := policyInfo["update_required"].(bool); updateRequired {
 		t.Fatalf("expected update_required=false after applied ack, body=%s", hbRes2.Body.String())
+	}
+}
+
+func TestPolicyUpsertWithBundleTemplate(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
+		"rules/mamotama.conf": "SecRuleEngine On\n",
+		"rules/z-last.conf":   "SecRule REQUEST_URI \"@contains admin\" \"id:12345,phase:1,deny\"\n",
+	})
+	reqBody, err := json.Marshal(map[string]any{
+		"version":          "waf-template-v1",
+		"waf_raw_template": "bundle_default",
+		"bundle_tgz_b64":   bundleB64,
+		"bundle_sha256":    bundleSHA,
+		"note":             "template-generated",
+	})
+	if err != nil {
+		t.Fatalf("marshal request body: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewReader(reqBody))
+	addAdminAPIKey(req)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("policy upsert with template failed: %d body=%s", res.Code, res.Body.String())
+	}
+
+	var body struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response body: %v", err)
+	}
+	if body.Policy.WAFRaw == "" {
+		t.Fatalf("expected generated waf_raw, body=%s", res.Body.String())
+	}
+	if body.Policy.SHA256 != hashStringHex(body.Policy.WAFRaw) {
+		t.Fatalf("expected sha256 to match generated waf_raw: %s", res.Body.String())
+	}
+	var waf map[string]any
+	if err := json.Unmarshal([]byte(body.Policy.WAFRaw), &waf); err != nil {
+		t.Fatalf("decode generated waf_raw: %v", err)
+	}
+	files, _ := waf["rule_files"].([]any)
+	if len(files) != 1 || files[0] != "${MAMOTAMA_POLICY_ACTIVE}/rules/mamotama.conf" {
+		t.Fatalf("unexpected generated rule_files: %#v", waf["rule_files"])
+	}
+}
+
+func TestPolicyPutTemplateUsesExistingBundle(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	bundleB64, bundleSHA := tgzBundleBase64(t, map[string]string{
+		"rules/main.conf": "SecRuleEngine On\n",
+	})
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-template-put-v1","waf_raw":"{\"enabled\":true,\"rule_files\":[\"./rules/main.conf\"]}","bundle_tgz_b64":"`+bundleB64+`","bundle_sha256":"`+bundleSHA+`"}`))
+	addAdminAPIKey(createReq)
+	createRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(createRes, createReq)
+	if createRes.Code != http.StatusOK {
+		t.Fatalf("create policy failed: %d body=%s", createRes.Code, createRes.Body.String())
+	}
+
+	putReq := httptest.NewRequest(http.MethodPut, "/v1/policies/waf-template-put-v1", bytes.NewBufferString(`{"waf_raw_template":"bundle_default"}`))
+	addAdminAPIKey(putReq)
+	putRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putRes, putReq)
+	if putRes.Code != http.StatusOK {
+		t.Fatalf("put policy with template failed: %d body=%s", putRes.Code, putRes.Body.String())
+	}
+	var putBody struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(putRes.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode put response body: %v", err)
+	}
+	if !strings.Contains(putBody.Policy.WAFRaw, "${MAMOTAMA_POLICY_ACTIVE}/rules/main.conf") {
+		t.Fatalf("expected template-generated rule file from existing bundle, body=%s", putRes.Body.String())
+	}
+}
+
+func TestPolicyUpsertRejectsRawAndTemplateTogether(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-template-invalid","waf_raw":"{\"enabled\":true,\"rule_files\":[\"./rules/a.conf\"]}","waf_raw_template":"bundle_default"}`))
+	addAdminAPIKey(req)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d body=%s", res.Code, res.Body.String())
 	}
 }
 
