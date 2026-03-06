@@ -20,6 +20,24 @@ Control plane for mamotama-edge.
   - requires signed payload fields: `device_id`, `key_id`, `timestamp`, `nonce`, `body_hash`, `signature_b64`
   - verifies Ed25519 signature using enrolled public key
   - applies timestamp skew and replay checks (`timestamp` + `nonce`)
+  - accepts edge-reported `current_policy_version`, `current_policy_sha256`
+  - returns desired/current policy state and `update_required`
+- `GET /v1/policies`
+  - lists policy versions and desired/current usage summary
+- `POST /v1/policies`
+  - header `X-License-Key` required
+  - upserts immutable policy version payload (`version`, `waf_raw`, optional `sha256`, `note`)
+- `GET /v1/policies/{version}`
+  - returns one policy and device usage counters
+- `POST /v1/devices/{device_id}:assign-policy`
+  - header `X-License-Key` required
+  - sets device desired policy version
+- `POST /v1/policy/pull`
+  - signed edge request to fetch assigned policy when update is required
+- `POST /v1/policy/ack`
+  - signed edge request to report `applied|failed|rolled_back`
+- `POST /v1/logs/push`
+  - signed edge request to upload gzip-compressed ndjson log batch
 - `POST /v1/devices/{device_id}:revoke`
   - header `X-License-Key` required
   - revokes active key for the device (heartbeat is rejected until re-enroll)
@@ -90,7 +108,7 @@ device_id + "\n" + key_id + "\n" + public_key_pem_b64 + "\n" + public_key_finger
 `heartbeat`:
 
 ```text
-device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
+device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash + "\n" + current_policy_version + "\n" + current_policy_sha256
 ```
 
 ## Device Status Flags
@@ -147,13 +165,6 @@ Notes:
 - `make check`
 - integration flow test:
   - `go test ./internal/center -run TestEndToEndEnrollHeartbeatRevokeReEnrollFlow`
-
-## Next Planned Features
-
-- rule distribution API
-- policy/version rollout control
-- log ingest pipeline
-- device management dashboard
 
 ## Related Project
 

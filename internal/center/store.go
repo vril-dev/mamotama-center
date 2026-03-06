@@ -1,7 +1,10 @@
 package center
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,12 +14,26 @@ import (
 	"time"
 )
 
+var (
+	errStoreConflict = errors.New("store conflict")
+	errStoreInvalid  = errors.New("store invalid")
+)
+
 type RevokedKeyRecord struct {
 	KeyID                      string `json:"key_id"`
 	PublicKeyPEMBase64         string `json:"public_key_pem_b64"`
 	PublicKeyFingerprintSHA256 string `json:"public_key_fingerprint_sha256"`
 	RevokedAt                  string `json:"revoked_at"`
 	Reason                     string `json:"reason,omitempty"`
+}
+
+type PolicyRecord struct {
+	Version   string `json:"version"`
+	SHA256    string `json:"sha256"`
+	WAFRaw    string `json:"waf_raw"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+	Note      string `json:"note,omitempty"`
 }
 
 type DeviceRecord struct {
@@ -36,24 +53,40 @@ type DeviceRecord struct {
 	LastHeartbeatMessageAt     string             `json:"last_heartbeat_message_at,omitempty"`
 	LastHeartbeatNonce         string             `json:"last_heartbeat_nonce,omitempty"`
 	LastHeartbeatStatusHash    string             `json:"last_heartbeat_status_hash,omitempty"`
+	DesiredPolicyVersion       string             `json:"desired_policy_version,omitempty"`
+	DesiredPolicySHA256        string             `json:"desired_policy_sha256,omitempty"`
+	DesiredPolicyAssignedAt    string             `json:"desired_policy_assigned_at,omitempty"`
+	CurrentPolicyVersion       string             `json:"current_policy_version,omitempty"`
+	CurrentPolicySHA256        string             `json:"current_policy_sha256,omitempty"`
+	LastPolicySyncAt           string             `json:"last_policy_sync_at,omitempty"`
+	LastPolicyAckAt            string             `json:"last_policy_ack_at,omitempty"`
+	LastPolicyAckStatus        string             `json:"last_policy_ack_status,omitempty"`
+	LastPolicyAckMessage       string             `json:"last_policy_ack_message,omitempty"`
+	LastLogUploadAt            string             `json:"last_log_upload_at,omitempty"`
+	LastLogUploadEntries       int                `json:"last_log_upload_entries,omitempty"`
+	LastLogUploadBytes         int64              `json:"last_log_upload_bytes,omitempty"`
+	LastLogUploadSHA256        string             `json:"last_log_upload_sha256,omitempty"`
 	RetiredAt                  string             `json:"retired_at,omitempty"`
 	RetireReason               string             `json:"retire_reason,omitempty"`
 }
 
 type storedDevices struct {
-	Devices []DeviceRecord `json:"devices"`
+	Devices  []DeviceRecord `json:"devices"`
+	Policies []PolicyRecord `json:"policies,omitempty"`
 }
 
 type deviceStore struct {
-	mu      sync.RWMutex
-	path    string
-	devices map[string]DeviceRecord
+	mu       sync.RWMutex
+	path     string
+	devices  map[string]DeviceRecord
+	policies map[string]PolicyRecord
 }
 
 func loadDeviceStore(path string) (*deviceStore, error) {
 	s := &deviceStore{
-		path:    path,
-		devices: map[string]DeviceRecord{},
+		path:     path,
+		devices:  map[string]DeviceRecord{},
+		policies: map[string]PolicyRecord{},
 	}
 
 	b, err := os.ReadFile(path)
@@ -79,6 +112,12 @@ func loadDeviceStore(path string) (*deviceStore, error) {
 		rec.KeyID = strings.TrimSpace(rec.KeyID)
 		rec.LastEnrollNonce = strings.TrimSpace(rec.LastEnrollNonce)
 		rec.LastHeartbeatNonce = strings.TrimSpace(rec.LastHeartbeatNonce)
+		rec.DesiredPolicyVersion = normalizePolicyVersion(rec.DesiredPolicyVersion)
+		rec.DesiredPolicySHA256 = strings.ToLower(strings.TrimSpace(rec.DesiredPolicySHA256))
+		rec.CurrentPolicyVersion = normalizePolicyVersion(rec.CurrentPolicyVersion)
+		rec.CurrentPolicySHA256 = strings.ToLower(strings.TrimSpace(rec.CurrentPolicySHA256))
+		rec.LastPolicyAckStatus = strings.TrimSpace(strings.ToLower(rec.LastPolicyAckStatus))
+		rec.LastLogUploadSHA256 = strings.ToLower(strings.TrimSpace(rec.LastLogUploadSHA256))
 		if rec.KeyID == "" && rec.PublicKeyFingerprintSHA256 != "" {
 			rec.KeyID = defaultKeyIDFromFingerprint(rec.PublicKeyFingerprintSHA256)
 		}
@@ -95,6 +134,21 @@ func loadDeviceStore(path string) (*deviceStore, error) {
 			}
 		}
 		s.devices[rec.DeviceID] = rec
+	}
+	for _, rec := range payload.Policies {
+		if rec.Version == "" {
+			continue
+		}
+		rec.Version = normalizePolicyVersion(rec.Version)
+		rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+		rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
+		if rec.SHA256 == "" && rec.WAFRaw != "" {
+			rec.SHA256 = hashStringHex(rec.WAFRaw)
+		}
+		if rec.Version == "" || rec.WAFRaw == "" || rec.SHA256 == "" {
+			continue
+		}
+		s.policies[rec.Version] = rec
 	}
 	return s, nil
 }
@@ -117,6 +171,71 @@ func (s *deviceStore) list() []DeviceRecord {
 		return devices[i].DeviceID < devices[j].DeviceID
 	})
 	return devices
+}
+
+func (s *deviceStore) listPolicies() []PolicyRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	policies := make([]PolicyRecord, 0, len(s.policies))
+	for _, rec := range s.policies {
+		policies = append(policies, rec)
+	}
+	sort.Slice(policies, func(i, j int) bool {
+		return policies[i].Version < policies[j].Version
+	})
+	return policies
+}
+
+func (s *deviceStore) getPolicy(version string) (PolicyRecord, bool) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return PolicyRecord{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.policies[version]
+	return rec, ok
+}
+
+func (s *deviceStore) upsertPolicy(rec PolicyRecord, now time.Time) (PolicyRecord, error) {
+	rec.Version = normalizePolicyVersion(rec.Version)
+	rec.WAFRaw = strings.TrimSpace(rec.WAFRaw)
+	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+	rec.Note = strings.TrimSpace(rec.Note)
+	if rec.Version == "" || rec.WAFRaw == "" {
+		return PolicyRecord{}, errStoreInvalid
+	}
+	if rec.SHA256 == "" {
+		rec.SHA256 = hashStringHex(rec.WAFRaw)
+	}
+	if rec.SHA256 != hashStringHex(rec.WAFRaw) {
+		return PolicyRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.policies[rec.Version]
+	if ok {
+		if existing.SHA256 == rec.SHA256 && existing.WAFRaw == rec.WAFRaw {
+			if rec.Note != "" && existing.Note == "" {
+				existing.Note = rec.Note
+				existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+				s.policies[rec.Version] = existing
+				if err := s.saveLocked(); err != nil {
+					return PolicyRecord{}, err
+				}
+			}
+			return existing, nil
+		}
+		return PolicyRecord{}, errStoreConflict
+	}
+	rec.CreatedAt = now.UTC().Format(time.RFC3339Nano)
+	rec.UpdatedAt = rec.CreatedAt
+	s.policies[rec.Version] = rec
+	if err := s.saveLocked(); err != nil {
+		return PolicyRecord{}, err
+	}
+	return rec, nil
 }
 
 func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool) {
@@ -150,6 +269,19 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 		rec.LastHeartbeatMessageAt = prev.LastHeartbeatMessageAt
 		rec.LastHeartbeatNonce = prev.LastHeartbeatNonce
 		rec.LastHeartbeatStatusHash = prev.LastHeartbeatStatusHash
+		rec.DesiredPolicyVersion = prev.DesiredPolicyVersion
+		rec.DesiredPolicySHA256 = prev.DesiredPolicySHA256
+		rec.DesiredPolicyAssignedAt = prev.DesiredPolicyAssignedAt
+		rec.CurrentPolicyVersion = prev.CurrentPolicyVersion
+		rec.CurrentPolicySHA256 = prev.CurrentPolicySHA256
+		rec.LastPolicySyncAt = prev.LastPolicySyncAt
+		rec.LastPolicyAckAt = prev.LastPolicyAckAt
+		rec.LastPolicyAckStatus = prev.LastPolicyAckStatus
+		rec.LastPolicyAckMessage = prev.LastPolicyAckMessage
+		rec.LastLogUploadAt = prev.LastLogUploadAt
+		rec.LastLogUploadEntries = prev.LastLogUploadEntries
+		rec.LastLogUploadBytes = prev.LastLogUploadBytes
+		rec.LastLogUploadSHA256 = prev.LastLogUploadSHA256
 		if rec.KeyVersion == 0 {
 			rec.KeyVersion = prev.KeyVersion
 		}
@@ -167,7 +299,7 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 	return rec, nil
 }
 
-func (s *deviceStore) updateHeartbeat(deviceID string, receivedAt time.Time, messageAt time.Time, nonce string, statusHash string) (DeviceRecord, error) {
+func (s *deviceStore) updateHeartbeat(deviceID string, receivedAt time.Time, messageAt time.Time, nonce string, statusHash string, policyVersion string, policyHash string) (DeviceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -180,11 +312,139 @@ func (s *deviceStore) updateHeartbeat(deviceID string, receivedAt time.Time, mes
 	rec.LastHeartbeatNonce = nonce
 	rec.LastHeartbeatStatusHash = statusHash
 	rec.LastSeenAt = rec.LastHeartbeatAt
+	policyVersion = normalizePolicyVersion(policyVersion)
+	policyHash = strings.ToLower(strings.TrimSpace(policyHash))
+	if policyVersion != "" {
+		rec.CurrentPolicyVersion = policyVersion
+		rec.CurrentPolicySHA256 = policyHash
+		rec.LastPolicySyncAt = rec.LastHeartbeatAt
+	}
 	s.devices[deviceID] = rec
 	if err := s.saveLocked(); err != nil {
 		return DeviceRecord{}, err
 	}
 	return rec, nil
+}
+
+func (s *deviceStore) assignDesiredPolicy(deviceID, version string, assignedAt time.Time) (DeviceRecord, PolicyRecord, error) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return DeviceRecord{}, PolicyRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, PolicyRecord{}, os.ErrNotExist
+	}
+	pol, ok := s.policies[version]
+	if !ok {
+		return DeviceRecord{}, PolicyRecord{}, os.ErrNotExist
+	}
+	rec.DesiredPolicyVersion = pol.Version
+	rec.DesiredPolicySHA256 = pol.SHA256
+	rec.DesiredPolicyAssignedAt = assignedAt.UTC().Format(time.RFC3339Nano)
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, PolicyRecord{}, err
+	}
+	return rec, pol, nil
+}
+
+func (s *deviceStore) updatePolicyAck(deviceID, version, hash, status, message string, ackAt time.Time) (DeviceRecord, error) {
+	version = normalizePolicyVersion(version)
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	status = strings.ToLower(strings.TrimSpace(status))
+	message = strings.TrimSpace(message)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+	rec.LastPolicyAckAt = ackAt.UTC().Format(time.RFC3339Nano)
+	rec.LastPolicyAckStatus = status
+	rec.LastPolicyAckMessage = message
+	if status == "applied" && version != "" {
+		rec.CurrentPolicyVersion = version
+		rec.CurrentPolicySHA256 = hash
+		rec.LastPolicySyncAt = rec.LastPolicyAckAt
+	}
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) saveLogBatch(deviceID string, messageAt time.Time, nonce string, payload []byte, entryCount int, contentSHA256 string) (DeviceRecord, string, error) {
+	nonce = strings.TrimSpace(nonce)
+	contentSHA256 = strings.ToLower(strings.TrimSpace(contentSHA256))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, "", os.ErrNotExist
+	}
+	if len(payload) == 0 {
+		return DeviceRecord{}, "", errStoreInvalid
+	}
+	if contentSHA256 == "" {
+		contentSHA256 = hashBytesHex(payload)
+	}
+	if contentSHA256 != hashBytesHex(payload) {
+		return DeviceRecord{}, "", errStoreInvalid
+	}
+
+	baseDir := filepath.Join(filepath.Dir(s.path), "logs", safePathComponent(deviceID))
+	if err := os.MkdirAll(baseDir, 0o700); err != nil {
+		return DeviceRecord{}, "", fmt.Errorf("mkdir logs dir: %w", err)
+	}
+	stamp := messageAt.UTC().Format("20060102T150405.000000000Z")
+	nonceToken := safePathComponent(nonce)
+	if nonceToken == "" {
+		nonceToken = "nonce"
+	}
+	name := fmt.Sprintf("%s-%s.ndjson.gz", stamp, nonceToken)
+	tmp, err := os.CreateTemp(baseDir, "batch-*.tmp")
+	if err != nil {
+		return DeviceRecord{}, "", fmt.Errorf("create temp log batch: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return DeviceRecord{}, "", fmt.Errorf("write temp log batch: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return DeviceRecord{}, "", fmt.Errorf("close temp log batch: %w", err)
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = os.Remove(tmpPath)
+		return DeviceRecord{}, "", fmt.Errorf("chmod temp log batch: %w", err)
+	}
+	outPath := filepath.Join(baseDir, name)
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return DeviceRecord{}, "", fmt.Errorf("rename log batch: %w", err)
+	}
+
+	rec.LastLogUploadAt = messageAt.UTC().Format(time.RFC3339Nano)
+	rec.LastLogUploadEntries = entryCount
+	rec.LastLogUploadBytes = int64(len(payload))
+	rec.LastLogUploadSHA256 = contentSHA256
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, "", err
+	}
+	return rec, outPath, nil
 }
 
 func (s *deviceStore) retire(deviceID string, retiredAt time.Time, reason string) (DeviceRecord, error) {
@@ -247,6 +507,55 @@ func (s *deviceStore) revokeKey(deviceID string, keyID string, revokedAt time.Ti
 	return rec, nil
 }
 
+func normalizePolicyVersion(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if len(raw) > 128 {
+		return ""
+	}
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.', r == ':':
+		default:
+			return ""
+		}
+	}
+	return raw
+}
+
+func safePathComponent(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	out := strings.Builder{}
+	for _, r := range raw {
+		switch {
+		case r >= 'a' && r <= 'z':
+			out.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			out.WriteRune(r)
+		case r >= '0' && r <= '9':
+			out.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			out.WriteRune(r)
+		default:
+			out.WriteByte('_')
+		}
+	}
+	return out.String()
+}
+
+func hashBytesHex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 func defaultKeyIDFromFingerprint(fingerprint string) string {
 	fingerprint = strings.ToLower(strings.TrimSpace(fingerprint))
 	if fingerprint == "" {
@@ -270,7 +579,14 @@ func (s *deviceStore) saveLocked() error {
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].DeviceID < devices[j].DeviceID
 	})
-	payload := storedDevices{Devices: devices}
+	policies := make([]PolicyRecord, 0, len(s.policies))
+	for _, rec := range s.policies {
+		policies = append(policies, rec)
+	}
+	sort.Slice(policies, func(i, j int) bool {
+		return policies[i].Version < policies[j].Version
+	})
+	payload := storedDevices{Devices: devices, Policies: policies}
 	out, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal store: %w", err)

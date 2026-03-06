@@ -2,6 +2,7 @@ package center
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/x509"
@@ -11,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -78,7 +80,7 @@ func signedEnrollPayload(t *testing.T, deviceID string, key testDeviceKey, ts ti
 	return b
 }
 
-func signedHeartbeatPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, statusHash string) []byte {
+func signedHeartbeatPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, statusHash string, policy ...string) []byte {
 	t.Helper()
 	req := heartbeatRequest{
 		DeviceID:   deviceID,
@@ -86,6 +88,12 @@ func signedHeartbeatPayload(t *testing.T, deviceID string, key testDeviceKey, ts
 		Timestamp:  ts.UTC().Format(time.RFC3339Nano),
 		Nonce:      nonce,
 		StatusHash: statusHash,
+	}
+	if len(policy) > 0 {
+		req.CurrentPolicyVersion = normalizePolicyVersion(policy[0])
+	}
+	if len(policy) > 1 {
+		req.CurrentPolicySHA256 = policy[1]
 	}
 	req.BodyHash = hashStringHex(heartbeatBodyCanonical(req))
 	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
@@ -95,6 +103,83 @@ func signedHeartbeatPayload(t *testing.T, deviceID string, key testDeviceKey, ts
 		t.Fatalf("marshal heartbeat payload: %v", err)
 	}
 	return b
+}
+
+func signedPolicyPullPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, currentVersion string, currentSHA string) []byte {
+	t.Helper()
+	req := policyPullRequest{
+		DeviceID:             deviceID,
+		KeyID:                key.KeyID,
+		Timestamp:            ts.UTC().Format(time.RFC3339Nano),
+		Nonce:                nonce,
+		CurrentPolicyVersion: normalizePolicyVersion(currentVersion),
+		CurrentPolicySHA256:  currentSHA,
+	}
+	req.BodyHash = hashStringHex(policyPullBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal policy pull payload: %v", err)
+	}
+	return b
+}
+
+func signedPolicyAckPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, version string, sha string, resultStatus string, message string) []byte {
+	t.Helper()
+	req := policyAckRequest{
+		DeviceID:      deviceID,
+		KeyID:         key.KeyID,
+		Timestamp:     ts.UTC().Format(time.RFC3339Nano),
+		Nonce:         nonce,
+		PolicyVersion: normalizePolicyVersion(version),
+		PolicySHA256:  sha,
+		ResultStatus:  resultStatus,
+		Message:       message,
+	}
+	req.BodyHash = hashStringHex(policyAckBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal policy ack payload: %v", err)
+	}
+	return b
+}
+
+func signedLogsPushPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, entryCount int, payload []byte) []byte {
+	t.Helper()
+	req := logsPushRequest{
+		DeviceID:        deviceID,
+		KeyID:           key.KeyID,
+		Timestamp:       ts.UTC().Format(time.RFC3339Nano),
+		Nonce:           nonce,
+		EntryCount:      entryCount,
+		ContentSHA256:   hashBytesHex(payload),
+		ContentEncoding: "gzip+base64",
+		PayloadB64:      base64.StdEncoding.EncodeToString(payload),
+	}
+	req.BodyHash = hashStringHex(logsPushBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal logs push payload: %v", err)
+	}
+	return b
+}
+
+func gzipBytes(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(raw); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
 }
 
 func TestEnrollAndHeartbeat(t *testing.T) {
@@ -726,5 +811,161 @@ func TestEndToEndEnrollHeartbeatRevokeReEnrollFlow(t *testing.T) {
 	srv.Handler().ServeHTTP(hb2Res, hb2Req)
 	if hb2Res.Code != http.StatusOK {
 		t.Fatalf("heartbeat2 failed: %d body=%s", hb2Res.Code, hb2Res.Body.String())
+	}
+}
+
+func TestPolicyAssignPullAckFlow(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-policy", key, baseTS, "policy-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	putPolicyReq := httptest.NewRequest(http.MethodPost, "/v1/policies", bytes.NewBufferString(`{"version":"waf-2026-03-06","waf_raw":"{\"enabled\":true,\"rule_files\":[\"./rules/mamotama.conf\"]}","note":"initial"}`))
+	putPolicyReq.Header.Set("X-License-Key", "test-license-key-1234")
+	putPolicyRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putPolicyRes, putPolicyReq)
+	if putPolicyRes.Code != http.StatusOK {
+		t.Fatalf("policy upsert failed: %d body=%s", putPolicyRes.Code, putPolicyRes.Body.String())
+	}
+	var putBody struct {
+		Policy PolicyRecord `json:"policy"`
+	}
+	if err := json.Unmarshal(putPolicyRes.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode policy upsert body: %v", err)
+	}
+	if putBody.Policy.Version != "waf-2026-03-06" || putBody.Policy.SHA256 == "" {
+		t.Fatalf("unexpected policy body: %s", putPolicyRes.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-policy:assign-policy", bytes.NewBufferString(`{"version":"waf-2026-03-06"}`))
+	assignReq.Header.Set("X-License-Key", "test-license-key-1234")
+	assignRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignRes, assignReq)
+	if assignRes.Code != http.StatusOK {
+		t.Fatalf("assign policy failed: %d body=%s", assignRes.Code, assignRes.Body.String())
+	}
+
+	hbReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-policy", key, baseTS.Add(time.Second), "policy-hb-1", "")))
+	hbRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes, hbReq)
+	if hbRes.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d body=%s", hbRes.Code, hbRes.Body.String())
+	}
+	var hbBody map[string]any
+	if err := json.Unmarshal(hbRes.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode heartbeat body: %v", err)
+	}
+	policyInfo, _ := hbBody["policy"].(map[string]any)
+	if updateRequired, _ := policyInfo["update_required"].(bool); !updateRequired {
+		t.Fatalf("expected update_required=true, body=%s", hbRes.Body.String())
+	}
+
+	pullReq := httptest.NewRequest(http.MethodPost, "/v1/policy/pull", bytes.NewReader(signedPolicyPullPayload(t, "device-policy", key, baseTS.Add(2*time.Second), "policy-pull-1", "", "")))
+	pullRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pullRes, pullReq)
+	if pullRes.Code != http.StatusOK {
+		t.Fatalf("policy pull failed: %d body=%s", pullRes.Code, pullRes.Body.String())
+	}
+	var pullBody struct {
+		UpdateRequired bool `json:"update_required"`
+		Policy         struct {
+			Version string `json:"version"`
+			SHA256  string `json:"sha256"`
+		} `json:"policy"`
+	}
+	if err := json.Unmarshal(pullRes.Body.Bytes(), &pullBody); err != nil {
+		t.Fatalf("decode pull body: %v", err)
+	}
+	if !pullBody.UpdateRequired {
+		t.Fatalf("expected pull update_required=true, body=%s", pullRes.Body.String())
+	}
+	if pullBody.Policy.Version != "waf-2026-03-06" || pullBody.Policy.SHA256 == "" {
+		t.Fatalf("unexpected pull policy: %s", pullRes.Body.String())
+	}
+
+	ackReq := httptest.NewRequest(http.MethodPost, "/v1/policy/ack", bytes.NewReader(signedPolicyAckPayload(t, "device-policy", key, baseTS.Add(3*time.Second), "policy-ack-1", pullBody.Policy.Version, pullBody.Policy.SHA256, "applied", "")))
+	ackRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(ackRes, ackReq)
+	if ackRes.Code != http.StatusOK {
+		t.Fatalf("policy ack failed: %d body=%s", ackRes.Code, ackRes.Body.String())
+	}
+
+	hbReq2 := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-policy", key, baseTS.Add(4*time.Second), "policy-hb-2", "", pullBody.Policy.Version, pullBody.Policy.SHA256)))
+	hbRes2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes2, hbReq2)
+	if hbRes2.Code != http.StatusOK {
+		t.Fatalf("second heartbeat failed: %d body=%s", hbRes2.Code, hbRes2.Body.String())
+	}
+	if err := json.Unmarshal(hbRes2.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode second heartbeat body: %v", err)
+	}
+	policyInfo, _ = hbBody["policy"].(map[string]any)
+	if updateRequired, _ := policyInfo["update_required"].(bool); updateRequired {
+		t.Fatalf("expected update_required=false after applied ack, body=%s", hbRes2.Body.String())
+	}
+}
+
+func TestLogsPushStoresCompressedBatch(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-logs", key, baseTS, "logs-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	payload := gzipBytes(t, []byte(`{"kind":"security","msg":"waf blocked","request_id":"r1"}`+"\n"+`{"kind":"access","msg":"proxy ok","request_id":"r2"}`+"\n"))
+	pushReq := httptest.NewRequest(http.MethodPost, "/v1/logs/push", bytes.NewReader(signedLogsPushPayload(t, "device-logs", key, baseTS.Add(time.Second), "logs-push-1", 2, payload)))
+	pushRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pushRes, pushReq)
+	if pushRes.Code != http.StatusOK {
+		t.Fatalf("logs push failed: %d body=%s", pushRes.Code, pushRes.Body.String())
+	}
+
+	rec, ok := srv.store.get("device-logs")
+	if !ok {
+		t.Fatal("expected stored device")
+	}
+	if rec.LastLogUploadEntries != 2 || rec.LastLogUploadBytes <= 0 || rec.LastLogUploadSHA256 == "" || rec.LastLogUploadAt == "" {
+		t.Fatalf("unexpected log upload metadata: %+v", rec)
+	}
+
+	logDir := filepath.Join(filepath.Dir(cfg.Storage.Path), "logs", "device-logs")
+	entries, err := os.ReadDir(logDir)
+	if err != nil {
+		t.Fatalf("read log dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected one stored log batch, got %d", len(entries))
+	}
+	if !entries[0].Type().IsRegular() {
+		t.Fatalf("expected regular file, got %v", entries[0].Type())
 	}
 }

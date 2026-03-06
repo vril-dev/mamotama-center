@@ -1,6 +1,8 @@
 package center
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -50,13 +52,63 @@ type enrollRequest struct {
 }
 
 type heartbeatRequest struct {
-	DeviceID     string `json:"device_id"`
-	KeyID        string `json:"key_id"`
-	Timestamp    string `json:"timestamp"`
-	Nonce        string `json:"nonce"`
-	StatusHash   string `json:"status_hash,omitempty"`
-	BodyHash     string `json:"body_hash"`
-	SignatureB64 string `json:"signature_b64"`
+	DeviceID             string `json:"device_id"`
+	KeyID                string `json:"key_id"`
+	Timestamp            string `json:"timestamp"`
+	Nonce                string `json:"nonce"`
+	StatusHash           string `json:"status_hash,omitempty"`
+	CurrentPolicyVersion string `json:"current_policy_version,omitempty"`
+	CurrentPolicySHA256  string `json:"current_policy_sha256,omitempty"`
+	BodyHash             string `json:"body_hash"`
+	SignatureB64         string `json:"signature_b64"`
+}
+
+type policyUpsertRequest struct {
+	Version string `json:"version"`
+	SHA256  string `json:"sha256,omitempty"`
+	WAFRaw  string `json:"waf_raw"`
+	Note    string `json:"note,omitempty"`
+}
+
+type policyAssignRequest struct {
+	Version string `json:"version"`
+}
+
+type policyPullRequest struct {
+	DeviceID             string `json:"device_id"`
+	KeyID                string `json:"key_id"`
+	Timestamp            string `json:"timestamp"`
+	Nonce                string `json:"nonce"`
+	CurrentPolicyVersion string `json:"current_policy_version,omitempty"`
+	CurrentPolicySHA256  string `json:"current_policy_sha256,omitempty"`
+	BodyHash             string `json:"body_hash"`
+	SignatureB64         string `json:"signature_b64"`
+}
+
+type policyAckRequest struct {
+	DeviceID      string `json:"device_id"`
+	KeyID         string `json:"key_id"`
+	Timestamp     string `json:"timestamp"`
+	Nonce         string `json:"nonce"`
+	PolicyVersion string `json:"policy_version"`
+	PolicySHA256  string `json:"policy_sha256,omitempty"`
+	ResultStatus  string `json:"result_status"`
+	Message       string `json:"message,omitempty"`
+	BodyHash      string `json:"body_hash"`
+	SignatureB64  string `json:"signature_b64"`
+}
+
+type logsPushRequest struct {
+	DeviceID        string `json:"device_id"`
+	KeyID           string `json:"key_id"`
+	Timestamp       string `json:"timestamp"`
+	Nonce           string `json:"nonce"`
+	EntryCount      int    `json:"entry_count"`
+	ContentSHA256   string `json:"content_sha256,omitempty"`
+	ContentEncoding string `json:"content_encoding,omitempty"`
+	PayloadB64      string `json:"payload_b64"`
+	BodyHash        string `json:"body_hash"`
+	SignatureB64    string `json:"signature_b64"`
 }
 
 type retireRequest struct {
@@ -101,6 +153,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	s.mux.HandleFunc("/v1/enroll", s.handleEnroll)
 	s.mux.HandleFunc("/v1/heartbeat", s.handleHeartbeat)
+	s.mux.HandleFunc("/v1/policies", s.handlePolicies)
+	s.mux.HandleFunc("/v1/policies/", s.handlePolicyByVersion)
+	s.mux.HandleFunc("/v1/policy/pull", s.handlePolicyPull)
+	s.mux.HandleFunc("/v1/policy/ack", s.handlePolicyAck)
+	s.mux.HandleFunc("/v1/logs/push", s.handleLogsPush)
 	s.mux.HandleFunc("/v1/devices", s.handleDevices)
 	s.mux.HandleFunc("/v1/devices/", s.handleDevice)
 }
@@ -307,6 +364,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
 	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
 	req.StatusHash = strings.TrimSpace(req.StatusHash)
+	req.CurrentPolicyVersion = normalizePolicyVersion(req.CurrentPolicyVersion)
+	req.CurrentPolicySHA256 = strings.ToLower(strings.TrimSpace(req.CurrentPolicySHA256))
 	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" {
 		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, body_hash, and signature_b64 are required")
 		return
@@ -378,17 +437,411 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	saved, err := s.store.updateHeartbeat(req.DeviceID, now, msgTS.UTC(), req.Nonce, req.StatusHash)
+	saved, err := s.store.updateHeartbeat(req.DeviceID, now, msgTS.UTC(), req.Nonce, req.StatusHash, req.CurrentPolicyVersion, req.CurrentPolicySHA256)
 	if err != nil {
 		s.logger.Printf(`{"level":"error","msg":"persist heartbeat failed","device_id":"%s","error":"%s"}`, req.DeviceID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist heartbeat")
 		return
+	}
+	updateRequired := saved.DesiredPolicyVersion != "" && (saved.CurrentPolicyVersion != saved.DesiredPolicyVersion || !secureTextEqual(saved.CurrentPolicySHA256, saved.DesiredPolicySHA256))
+	policy := map[string]any{
+		"desired_version":  saved.DesiredPolicyVersion,
+		"desired_sha256":   saved.DesiredPolicySHA256,
+		"desired_assigned": saved.DesiredPolicyAssignedAt,
+		"current_version":  saved.CurrentPolicyVersion,
+		"current_sha256":   saved.CurrentPolicySHA256,
+		"last_sync_at":     saved.LastPolicySyncAt,
+		"update_required":  updateRequired,
+		"fetch_path":       "",
+	}
+	if updateRequired {
+		policy["fetch_path"] = "/v1/policy/pull"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":            "ok",
 		"device_id":         saved.DeviceID,
 		"last_heartbeat_at": saved.LastHeartbeatAt,
 		"device_status":     s.buildDeviceStatus(saved, now),
+		"policy":            policy,
+	})
+}
+
+func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		policies := s.store.listPolicies()
+		devices := s.store.list()
+		assigned := make(map[string]int, len(policies))
+		applied := make(map[string]int, len(policies))
+		for _, rec := range devices {
+			if rec.DesiredPolicyVersion != "" {
+				assigned[rec.DesiredPolicyVersion]++
+			}
+			if rec.CurrentPolicyVersion != "" {
+				applied[rec.CurrentPolicyVersion]++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"policies": policies,
+			"summary": map[string]any{
+				"count":               len(policies),
+				"assigned_by_version": assigned,
+				"applied_by_version":  applied,
+			},
+		})
+	case http.MethodPost:
+		if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
+			writeError(w, http.StatusUnauthorized, "invalid license key")
+			return
+		}
+		var req policyUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		now := s.nowFn().UTC()
+		pol, err := s.store.upsertPolicy(PolicyRecord{
+			Version: req.Version,
+			SHA256:  req.SHA256,
+			WAFRaw:  req.WAFRaw,
+			Note:    req.Note,
+		}, now)
+		if err != nil {
+			switch {
+			case errors.Is(err, errStoreConflict):
+				writeError(w, http.StatusConflict, "policy version already exists with different content")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusUnprocessableEntity, "invalid policy payload")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"persist policy failed","version":"%s","error":"%s"}`, strings.TrimSpace(req.Version), err)
+				writeError(w, http.StatusInternalServerError, "failed to persist policy")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status": "ok",
+			"policy": pol,
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	version, ok := parsePolicyVersionPath(r.URL.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "policy version is required in path")
+		return
+	}
+	pol, found := s.store.getPolicy(version)
+	if !found {
+		writeError(w, http.StatusNotFound, "policy not found")
+		return
+	}
+	devices := s.store.list()
+	var desired, current int
+	for _, rec := range devices {
+		if rec.DesiredPolicyVersion == pol.Version {
+			desired++
+		}
+		if rec.CurrentPolicyVersion == pol.Version {
+			current++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"policy": pol,
+		"usage": map[string]any{
+			"desired_device_count": desired,
+			"current_device_count": current,
+		},
+	})
+}
+
+func (s *Server) handlePolicyPull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	var req policyPullRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.CurrentPolicyVersion = normalizePolicyVersion(req.CurrentPolicyVersion)
+	req.CurrentPolicySHA256 = strings.ToLower(strings.TrimSpace(req.CurrentPolicySHA256))
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, body_hash, and signature_b64 are required")
+		return
+	}
+
+	rec, _, now, ok := s.authenticateSignedDeviceRequest(
+		w,
+		"policy_pull",
+		req.DeviceID,
+		req.KeyID,
+		req.Timestamp,
+		req.Nonce,
+		req.BodyHash,
+		req.SignatureB64,
+		policyPullBodyCanonical(req),
+	)
+	if !ok {
+		return
+	}
+
+	updateRequired := rec.DesiredPolicyVersion != "" && (rec.CurrentPolicyVersion != rec.DesiredPolicyVersion || !secureTextEqual(rec.CurrentPolicySHA256, rec.DesiredPolicySHA256))
+	if !updateRequired {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "ok",
+			"device_id":       rec.DeviceID,
+			"update_required": false,
+			"policy": map[string]any{
+				"desired_version": rec.DesiredPolicyVersion,
+				"desired_sha256":  rec.DesiredPolicySHA256,
+				"current_version": rec.CurrentPolicyVersion,
+				"current_sha256":  rec.CurrentPolicySHA256,
+			},
+			"device_status": s.buildDeviceStatus(rec, now),
+		})
+		return
+	}
+	pol, found := s.store.getPolicy(rec.DesiredPolicyVersion)
+	if !found {
+		writeError(w, http.StatusConflict, "assigned policy is missing")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "ok",
+		"device_id":       rec.DeviceID,
+		"update_required": true,
+		"policy": map[string]any{
+			"version":      pol.Version,
+			"sha256":       pol.SHA256,
+			"waf_raw":      pol.WAFRaw,
+			"note":         pol.Note,
+			"created_at":   pol.CreatedAt,
+			"updated_at":   pol.UpdatedAt,
+			"assigned_at":  rec.DesiredPolicyAssignedAt,
+			"current_seen": rec.CurrentPolicyVersion,
+		},
+		"device_status": s.buildDeviceStatus(rec, now),
+	})
+}
+
+func (s *Server) handlePolicyAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	var req policyAckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.PolicyVersion = normalizePolicyVersion(req.PolicyVersion)
+	req.PolicySHA256 = strings.ToLower(strings.TrimSpace(req.PolicySHA256))
+	req.ResultStatus = strings.ToLower(strings.TrimSpace(req.ResultStatus))
+	req.Message = strings.TrimSpace(req.Message)
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" || req.ResultStatus == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, result_status, body_hash, and signature_b64 are required")
+		return
+	}
+	switch req.ResultStatus {
+	case "applied", "failed", "rolled_back":
+	default:
+		writeError(w, http.StatusBadRequest, "result_status must be applied|failed|rolled_back")
+		return
+	}
+	if len(req.Message) > 512 {
+		writeError(w, http.StatusBadRequest, "message must be 512 chars or less")
+		return
+	}
+
+	rec, _, now, ok := s.authenticateSignedDeviceRequest(
+		w,
+		"policy_ack",
+		req.DeviceID,
+		req.KeyID,
+		req.Timestamp,
+		req.Nonce,
+		req.BodyHash,
+		req.SignatureB64,
+		policyAckBodyCanonical(req),
+	)
+	if !ok {
+		return
+	}
+
+	if req.ResultStatus == "applied" {
+		if req.PolicyVersion == "" || req.PolicySHA256 == "" {
+			writeError(w, http.StatusBadRequest, "policy_version and policy_sha256 are required when result_status=applied")
+			return
+		}
+		if rec.DesiredPolicyVersion != "" && req.PolicyVersion != rec.DesiredPolicyVersion {
+			writeError(w, http.StatusConflict, "ack policy_version does not match desired policy")
+			return
+		}
+		if rec.DesiredPolicySHA256 != "" && !secureTextEqual(req.PolicySHA256, rec.DesiredPolicySHA256) {
+			writeError(w, http.StatusConflict, "ack policy_sha256 does not match desired policy")
+			return
+		}
+	}
+
+	saved, err := s.store.updatePolicyAck(req.DeviceID, req.PolicyVersion, req.PolicySHA256, req.ResultStatus, req.Message, now)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "device is not enrolled")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist policy ack failed","device_id":"%s","error":"%s"}`, req.DeviceID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist policy ack")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"device_id": saved.DeviceID,
+		"policy": map[string]any{
+			"desired_version":  saved.DesiredPolicyVersion,
+			"desired_sha256":   saved.DesiredPolicySHA256,
+			"current_version":  saved.CurrentPolicyVersion,
+			"current_sha256":   saved.CurrentPolicySHA256,
+			"last_sync_at":     saved.LastPolicySyncAt,
+			"last_ack_at":      saved.LastPolicyAckAt,
+			"last_ack_status":  saved.LastPolicyAckStatus,
+			"last_ack_message": saved.LastPolicyAckMessage,
+		},
+		"device_status": s.buildDeviceStatus(saved, now),
+	})
+}
+
+func (s *Server) handleLogsPush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	var req logsPushRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.ContentSHA256 = strings.ToLower(strings.TrimSpace(req.ContentSHA256))
+	req.ContentEncoding = strings.ToLower(strings.TrimSpace(req.ContentEncoding))
+	req.PayloadB64 = strings.TrimSpace(req.PayloadB64)
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.PayloadB64 == "" || req.BodyHash == "" || req.SignatureB64 == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, payload_b64, body_hash, and signature_b64 are required")
+		return
+	}
+	if req.EntryCount < 0 {
+		writeError(w, http.StatusBadRequest, "entry_count must be >= 0")
+		return
+	}
+	switch req.ContentEncoding {
+	case "", "gzip+base64":
+		if req.ContentEncoding == "" {
+			req.ContentEncoding = "gzip+base64"
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "content_encoding must be gzip+base64")
+		return
+	}
+
+	_, msgTS, now, ok := s.authenticateSignedDeviceRequest(
+		w,
+		"logs_push",
+		req.DeviceID,
+		req.KeyID,
+		req.Timestamp,
+		req.Nonce,
+		req.BodyHash,
+		req.SignatureB64,
+		logsPushBodyCanonical(req),
+	)
+	if !ok {
+		return
+	}
+
+	payload, err := base64.StdEncoding.DecodeString(req.PayloadB64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "payload_b64 is invalid base64")
+		return
+	}
+	if len(payload) == 0 {
+		writeError(w, http.StatusBadRequest, "payload_b64 is empty")
+		return
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(payload))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "payload must be gzip stream")
+		return
+	}
+	_, _ = io.CopyN(io.Discard, zr, 1)
+	if err := zr.Close(); err != nil {
+		writeError(w, http.StatusBadRequest, "payload must be valid gzip stream")
+		return
+	}
+
+	saved, outPath, err := s.store.saveLogBatch(req.DeviceID, msgTS, req.Nonce, payload, req.EntryCount, req.ContentSHA256)
+	if err != nil {
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			writeError(w, http.StatusNotFound, "device is not enrolled")
+		case errors.Is(err, errStoreInvalid):
+			writeError(w, http.StatusUnprocessableEntity, "invalid log payload")
+		default:
+			s.logger.Printf(`{"level":"error","msg":"persist log batch failed","device_id":"%s","error":"%s"}`, req.DeviceID, err)
+			writeError(w, http.StatusInternalServerError, "failed to persist log batch")
+		}
+		return
+	}
+	s.logger.Printf(`{"level":"info","msg":"log batch uploaded","device_id":"%s","entries":%d,"bytes":%d}`, req.DeviceID, req.EntryCount, len(payload))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"device_id": saved.DeviceID,
+		"log_batch": map[string]any{
+			"stored_path": outPath,
+			"entry_count": saved.LastLogUploadEntries,
+			"bytes":       saved.LastLogUploadBytes,
+			"sha256":      saved.LastLogUploadSHA256,
+			"uploaded_at": saved.LastLogUploadAt,
+		},
+		"device_status": s.buildDeviceStatus(saved, now),
 	})
 }
 
@@ -448,6 +901,10 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "revoke" {
 		s.handleRevokeDeviceKey(w, r, deviceID)
+		return
+	}
+	if action == "assign-policy" {
+		s.handleAssignDesiredPolicy(w, r, deviceID)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -568,6 +1025,61 @@ func (s *Server) handleRevokeDeviceKey(w http.ResponseWriter, r *http.Request, d
 	})
 }
 
+func (s *Server) handleAssignDesiredPolicy(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	if !s.hasValidLicense(r.Header.Get("X-License-Key")) {
+		writeError(w, http.StatusUnauthorized, "invalid license key")
+		return
+	}
+
+	var req policyAssignRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.Version = normalizePolicyVersion(req.Version)
+	if req.Version == "" {
+		writeError(w, http.StatusBadRequest, "version is required")
+		return
+	}
+
+	now := s.nowFn().UTC()
+	saved, pol, err := s.store.assignDesiredPolicy(deviceID, req.Version, now)
+	if err != nil {
+		if errors.Is(err, errStoreInvalid) {
+			writeError(w, http.StatusBadRequest, "version is invalid")
+			return
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			if _, exists := s.store.get(deviceID); !exists {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+			writeError(w, http.StatusNotFound, "policy not found")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist policy assignment failed","device_id":"%s","version":"%s","error":"%s"}`, deviceID, req.Version, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist policy assignment")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"device_id": saved.DeviceID,
+		"policy": map[string]any{
+			"version":     pol.Version,
+			"sha256":      pol.SHA256,
+			"assigned_at": saved.DesiredPolicyAssignedAt,
+		},
+		"device_status": s.buildDeviceStatus(saved, now),
+	})
+}
+
 func (s *Server) buildDeviceStatus(rec DeviceRecord, now time.Time) deviceStatusView {
 	if strings.TrimSpace(rec.RetiredAt) != "" {
 		lastSeenRef := strings.TrimSpace(rec.LastHeartbeatAt)
@@ -649,6 +1161,77 @@ func statusFromHeartbeatAge(hasHeartbeat bool, age time.Duration, interval time.
 	return "stale", true
 }
 
+func (s *Server) authenticateSignedDeviceRequest(
+	w http.ResponseWriter,
+	scope string,
+	deviceID string,
+	keyID string,
+	timestamp string,
+	nonce string,
+	bodyHash string,
+	signatureB64 string,
+	canonicalBody string,
+) (DeviceRecord, time.Time, time.Time, bool) {
+	if !isValidKeyID(keyID) {
+		writeError(w, http.StatusBadRequest, "key_id is invalid")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	rec, ok := s.store.get(deviceID)
+	if !ok {
+		writeError(w, http.StatusNotFound, "device is not enrolled")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	if strings.TrimSpace(rec.RetiredAt) != "" {
+		writeError(w, http.StatusGone, "device is retired")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	if strings.TrimSpace(rec.KeyID) == "" || strings.TrimSpace(rec.PublicKeyPEMBase64) == "" {
+		writeError(w, http.StatusGone, "device key is revoked")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	if rec.KeyID != keyID {
+		writeError(w, http.StatusUnauthorized, "key_id mismatch")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+
+	msgTS, ok := parseRFC3339Any(timestamp)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "timestamp must be RFC3339")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	now := s.nowFn().UTC()
+	if !withinSkew(now, msgTS.UTC(), s.cfg.Heartbeat.MaxClockSkew.Duration) {
+		writeError(w, http.StatusUnauthorized, "timestamp out of allowed skew")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	if s.nonceCache.remember(scope, deviceID, nonce, now) {
+		writeError(w, http.StatusConflict, "reused nonce")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	if !secureTextEqual(bodyHash, hashStringHex(canonicalBody)) {
+		writeError(w, http.StatusUnauthorized, "body_hash mismatch")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+
+	pub, err := parseEd25519PublicKeyFromBase64PEM(rec.PublicKeyPEMBase64)
+	if err != nil {
+		s.logger.Printf(`{"level":"error","msg":"stored public key decode failed","device_id":"%s","error":"%s"}`, deviceID, err)
+		writeError(w, http.StatusInternalServerError, "stored key is invalid")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	signature, err := base64.StdEncoding.DecodeString(signatureB64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "signature_b64 is invalid base64")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	message := signedEnvelopeMessage(deviceID, keyID, timestamp, nonce, bodyHash)
+	if !ed25519.Verify(pub, []byte(message), signature) {
+		writeError(w, http.StatusUnauthorized, "invalid signature")
+		return DeviceRecord{}, time.Time{}, time.Time{}, false
+	}
+	return rec, msgTS.UTC(), now, true
+}
+
 func parseRFC3339Any(raw string) (time.Time, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -690,6 +1273,13 @@ func parseDevicePath(path string) (deviceID string, action string, ok bool) {
 		}
 		return deviceID, "revoke", true
 	}
+	if strings.HasSuffix(deviceID, ":assign-policy") {
+		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":assign-policy"))
+		if deviceID == "" {
+			return "", "", false
+		}
+		return deviceID, "assign-policy", true
+	}
 	return deviceID, "", true
 }
 
@@ -706,7 +1296,31 @@ func enrollBodyCanonical(req enrollRequest) string {
 }
 
 func heartbeatBodyCanonical(req heartbeatRequest) string {
-	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.StatusHash
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.StatusHash + "\n" + req.CurrentPolicyVersion + "\n" + req.CurrentPolicySHA256
+}
+
+func policyPullBodyCanonical(req policyPullRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.CurrentPolicyVersion + "\n" + req.CurrentPolicySHA256
+}
+
+func policyAckBodyCanonical(req policyAckRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.PolicyVersion + "\n" + req.PolicySHA256 + "\n" + req.ResultStatus + "\n" + req.Message
+}
+
+func logsPushBodyCanonical(req logsPushRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + strconv.Itoa(req.EntryCount) + "\n" + req.ContentSHA256 + "\n" + req.ContentEncoding
+}
+
+func parsePolicyVersionPath(path string) (string, bool) {
+	version := strings.TrimSpace(strings.TrimPrefix(path, "/v1/policies/"))
+	if version == "" || strings.Contains(version, "/") {
+		return "", false
+	}
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return "", false
+	}
+	return version, true
 }
 
 func hashStringHex(raw string) string {
