@@ -12,7 +12,9 @@
       "replace-with-strong-license-key-001"
     ],
     "require_tls": true,
-    "trust_forwarded_proto": false
+    "trust_forwarded_proto": false,
+    "nonce_ttl": "10m",
+    "max_nonces_per_device": 256
   },
   "storage": {
     "path": "./center-data/devices.json"

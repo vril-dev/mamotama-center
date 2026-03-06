@@ -28,6 +28,8 @@ type AuthConfig struct {
 	EnrollmentLicenseKeys []string `json:"enrollment_license_keys"`
 	RequireTLS            bool     `json:"require_tls"`
 	TrustForwardedProto   bool     `json:"trust_forwarded_proto"`
+	NonceTTL              Duration `json:"nonce_ttl"`
+	MaxNoncesPerDevice    int      `json:"max_nonces_per_device"`
 }
 
 type StorageConfig struct {
@@ -55,6 +57,8 @@ func defaultConfig() Config {
 			EnrollmentLicenseKeys: nil,
 			RequireTLS:            true,
 			TrustForwardedProto:   false,
+			NonceTTL:              Duration{Duration: 10 * time.Minute},
+			MaxNoncesPerDevice:    256,
 		},
 		Storage: StorageConfig{
 			Path: "./center-data/devices.json",
@@ -115,6 +119,12 @@ func validate(cfg Config) error {
 		if len(key) < 16 {
 			return fmt.Errorf("auth.enrollment_license_keys contains a key shorter than 16 chars")
 		}
+	}
+	if cfg.Auth.NonceTTL.Duration <= 0 {
+		return fmt.Errorf("auth.nonce_ttl must be positive")
+	}
+	if cfg.Auth.MaxNoncesPerDevice <= 0 {
+		return fmt.Errorf("auth.max_nonces_per_device must be positive")
 	}
 	if cfg.Heartbeat.MaxClockSkew.Duration <= 0 {
 		return fmt.Errorf("heartbeat.max_clock_skew must be positive")

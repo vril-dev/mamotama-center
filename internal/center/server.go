@@ -18,15 +18,24 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Server struct {
-	cfg    Config
-	logger *log.Logger
-	store  *deviceStore
-	nowFn  func() time.Time
-	mux    *http.ServeMux
+	cfg        Config
+	logger     *log.Logger
+	store      *deviceStore
+	nonceCache *nonceReplayCache
+	nowFn      func() time.Time
+	mux        *http.ServeMux
+}
+
+type nonceReplayCache struct {
+	mu       sync.Mutex
+	ttl      time.Duration
+	maxItems int
+	byDevice map[string]map[string]time.Time
 }
 
 type enrollRequest struct {
@@ -73,11 +82,12 @@ func NewServer(cfg Config, logger *log.Logger) (*Server, error) {
 		return nil, fmt.Errorf("load device store: %w", err)
 	}
 	s := &Server{
-		cfg:    cfg,
-		logger: logger,
-		store:  store,
-		nowFn:  time.Now,
-		mux:    http.NewServeMux(),
+		cfg:        cfg,
+		logger:     logger,
+		store:      store,
+		nonceCache: newNonceReplayCache(cfg.Auth.NonceTTL.Duration, cfg.Auth.MaxNoncesPerDevice),
+		nowFn:      time.Now,
+		mux:        http.NewServeMux(),
 	}
 	s.routes()
 	return s, nil
@@ -182,6 +192,10 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "public key already bound to another device_id")
 		return
 	}
+	if s.nonceCache.remember("enroll", req.DeviceID, req.Nonce, now) {
+		writeError(w, http.StatusConflict, "reused enroll nonce")
+		return
+	}
 
 	addr := remoteAddressOnly(r.RemoteAddr)
 	current, exists := s.store.get(req.DeviceID)
@@ -192,11 +206,6 @@ func (s *Server) handleEnroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if exists && current.LastEnrollNonce != "" && secureTextEqual(current.LastEnrollNonce, req.Nonce) {
-		writeError(w, http.StatusConflict, "reused enroll nonce")
-		return
-	}
-
 	rotated := false
 	reactivated := exists && strings.TrimSpace(current.RetiredAt) != ""
 	if exists && (current.KeyID == "" || current.PublicKeyPEMBase64 == "" || current.PublicKeyFingerprintSHA256 == "") {
@@ -343,7 +352,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if rec.LastHeartbeatNonce != "" && secureTextEqual(rec.LastHeartbeatNonce, req.Nonce) {
+	if s.nonceCache.remember("heartbeat", req.DeviceID, req.Nonce, now) {
 		writeError(w, http.StatusConflict, "reused heartbeat nonce")
 		return
 	}
@@ -746,6 +755,62 @@ func (s *Server) ensureSecureTransport(w http.ResponseWriter, r *http.Request) b
 		}
 	}
 	writeError(w, http.StatusUpgradeRequired, "tls is required")
+	return false
+}
+
+func newNonceReplayCache(ttl time.Duration, maxItems int) *nonceReplayCache {
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	if maxItems <= 0 {
+		maxItems = 256
+	}
+	return &nonceReplayCache{
+		ttl:      ttl,
+		maxItems: maxItems,
+		byDevice: make(map[string]map[string]time.Time),
+	}
+}
+
+func (c *nonceReplayCache) remember(scope string, deviceID string, nonce string, now time.Time) bool {
+	scope = strings.TrimSpace(scope)
+	deviceID = strings.TrimSpace(deviceID)
+	nonce = strings.TrimSpace(nonce)
+	if scope == "" || deviceID == "" || nonce == "" {
+		return false
+	}
+	key := scope + ":" + deviceID
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	entries, ok := c.byDevice[key]
+	if !ok {
+		entries = make(map[string]time.Time, c.maxItems)
+		c.byDevice[key] = entries
+	}
+	for n, expiresAt := range entries {
+		if !expiresAt.After(now) {
+			delete(entries, n)
+		}
+	}
+	if expiresAt, exists := entries[nonce]; exists && expiresAt.After(now) {
+		return true
+	}
+	if len(entries) >= c.maxItems {
+		var oldestNonce string
+		var oldest time.Time
+		for n, expiresAt := range entries {
+			if oldestNonce == "" || expiresAt.Before(oldest) {
+				oldestNonce = n
+				oldest = expiresAt
+			}
+		}
+		if oldestNonce != "" {
+			delete(entries, oldestNonce)
+		}
+	}
+	entries[nonce] = now.Add(c.ttl)
 	return false
 }
 

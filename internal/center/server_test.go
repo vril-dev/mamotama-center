@@ -598,3 +598,133 @@ func TestHeartbeatRejectsNonceReuse(t *testing.T) {
 		t.Fatalf("expected heartbeat nonce reuse conflict, got %d body=%s", secondRes.Code, secondRes.Body.String())
 	}
 }
+
+func TestHeartbeatAllowsNonceReuseAfterTTL(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Auth.NonceTTL.Duration = 2 * time.Second
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	baseTS := time.Now().UTC()
+	key := newTestDeviceKey(t)
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-nonce-ttl", key, baseTS, "enroll-nonce-ttl-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("unexpected enroll status: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	srv.nowFn = func() time.Time { return baseTS.Add(time.Second) }
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-nonce-ttl", key, baseTS.Add(time.Second), "hb-nonce-ttl", "")))
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first heartbeat status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	srv.nowFn = func() time.Time { return baseTS.Add(4 * time.Second) }
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-nonce-ttl", key, baseTS.Add(4*time.Second), "hb-nonce-ttl", "")))
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusOK {
+		t.Fatalf("expected heartbeat nonce reuse allowed after ttl, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+}
+
+func TestEnrollRejectsNonceReuseWithinTTL(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Auth.NonceTTL.Duration = 10 * time.Minute
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	baseTS := time.Now().UTC()
+	key := newTestDeviceKey(t)
+
+	firstReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-enroll-nonce", key, baseTS, "enroll-nonce-reuse")))
+	firstReq.Header.Set("X-License-Key", "test-license-key-1234")
+	firstRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(firstRes, firstReq)
+	if firstRes.Code != http.StatusOK {
+		t.Fatalf("unexpected first enroll status: %d body=%s", firstRes.Code, firstRes.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-enroll-nonce", key, baseTS.Add(time.Second), "enroll-nonce-reuse")))
+	secondReq.Header.Set("X-License-Key", "test-license-key-1234")
+	secondRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(secondRes, secondReq)
+	if secondRes.Code != http.StatusConflict {
+		t.Fatalf("expected enroll nonce reuse conflict, got %d body=%s", secondRes.Code, secondRes.Body.String())
+	}
+}
+
+func TestEndToEndEnrollHeartbeatRevokeReEnrollFlow(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	baseTS := time.Now().UTC()
+	key1 := newTestDeviceKey(t)
+	key2 := newTestDeviceKey(t)
+
+	enroll1Req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-e2e", key1, baseTS, "e2e-enroll-1")))
+	enroll1Req.Header.Set("X-License-Key", "test-license-key-1234")
+	enroll1Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enroll1Res, enroll1Req)
+	if enroll1Res.Code != http.StatusOK {
+		t.Fatalf("enroll1 failed: %d body=%s", enroll1Res.Code, enroll1Res.Body.String())
+	}
+
+	hb1Req := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-e2e", key1, baseTS.Add(time.Second), "e2e-hb-1", "")))
+	hb1Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hb1Res, hb1Req)
+	if hb1Res.Code != http.StatusOK {
+		t.Fatalf("heartbeat1 failed: %d body=%s", hb1Res.Code, hb1Res.Body.String())
+	}
+
+	revokeReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-e2e:revoke", bytes.NewReader([]byte(`{"reason":"test"}`)))
+	revokeReq.Header.Set("X-License-Key", "test-license-key-1234")
+	revokeRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(revokeRes, revokeReq)
+	if revokeRes.Code != http.StatusOK {
+		t.Fatalf("revoke failed: %d body=%s", revokeRes.Code, revokeRes.Body.String())
+	}
+
+	hbAfterRevokeReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-e2e", key1, baseTS.Add(2*time.Second), "e2e-hb-2", "")))
+	hbAfterRevokeRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbAfterRevokeRes, hbAfterRevokeReq)
+	if hbAfterRevokeRes.Code != http.StatusGone {
+		t.Fatalf("heartbeat after revoke should fail: %d body=%s", hbAfterRevokeRes.Code, hbAfterRevokeRes.Body.String())
+	}
+
+	enroll2Req := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-e2e", key2, baseTS.Add(3*time.Second), "e2e-enroll-2")))
+	enroll2Req.Header.Set("X-License-Key", "test-license-key-1234")
+	enroll2Req.Header.Set("X-Allow-Key-Rotation", "true")
+	enroll2Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enroll2Res, enroll2Req)
+	if enroll2Res.Code != http.StatusOK {
+		t.Fatalf("re-enroll failed: %d body=%s", enroll2Res.Code, enroll2Res.Body.String())
+	}
+
+	hb2Req := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-e2e", key2, baseTS.Add(4*time.Second), "e2e-hb-3", "")))
+	hb2Res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hb2Res, hb2Req)
+	if hb2Res.Code != http.StatusOK {
+		t.Fatalf("heartbeat2 failed: %d body=%s", hb2Res.Code, hb2Res.Body.String())
+	}
+}

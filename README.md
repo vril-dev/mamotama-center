@@ -45,6 +45,7 @@ cp center.config.example.json center.config.json
 - set `auth.enrollment_license_keys` (16+ chars, one or more keys)
 - keep `auth.require_tls=true` for production
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
+- tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
 - set `storage.path` (persistent file path)
 - optional: tune `heartbeat.max_clock_skew`
 - optional: tune `heartbeat.expected_interval`
@@ -116,12 +117,36 @@ device_id + "\n" + key_id + "\n" + timestamp + "\n" + nonce + "\n" + status_hash
   - allowed with valid license key
   - response includes `reactivated=true`
 
+## Revoke Runbook
+
+Key compromise response should follow this fixed sequence:
+
+1. Revoke active key on center:
+
+```bash
+make device-revoke \
+  CENTER_URL=https://center.example.com \
+  DEVICE_ID=device-001 \
+  REASON=compromised \
+  CENTER_LICENSE_KEY_FILE=./center-license.key
+```
+
+2. Rotate key on edge (generate new keypair).
+3. Re-enroll edge with `X-Allow-Key-Rotation: true` (edge `make center-register` flow).
+4. Verify new signed heartbeat is accepted.
+
+Notes:
+- During revoked state, `POST /v1/heartbeat` returns `410 Gone` for that device.
+- `scripts/center_revoke.sh` enforces HTTPS by default (`CENTER_ALLOW_INSECURE_HTTP=1` only for local dev).
+
 ## Build Targets
 
 - `make build`
 - `make run`
 - `make config-check`
 - `make check`
+- integration flow test:
+  - `go test ./internal/center -run TestEndToEndEnrollHeartbeatRevokeReEnrollFlow`
 
 ## Next Planned Features
 
