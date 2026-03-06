@@ -158,6 +158,12 @@ const adminDevicesPageHTML = `<!doctype html>
         <span class="muted">desired: <span id="rfDesiredVersion" class="mono">-</span></span>
         <span class="muted">target(edit): <span id="rfTargetVersion" class="mono">-</span></span>
       </div>
+      <div class="row">
+        <div style="min-width:420px; flex:1;">
+          <label>Policy Active Base (preview expand)</label>
+          <input id="rfActiveBase" value="/var/lib/mamotama-edge/policy-active" placeholder="/var/lib/mamotama-edge/policy-active">
+        </div>
+      </div>
       <div class="grid">
         <div>
           <label>Current rule_files</label>
@@ -170,6 +176,20 @@ const adminDevicesPageHTML = `<!doctype html>
         <div>
           <label>Target(edit) rule_files</label>
           <pre id="rfTarget" class="box"></pre>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:8px;">
+        <div>
+          <label>Current expanded (preview)</label>
+          <pre id="rfCurrentExpanded" class="box"></pre>
+        </div>
+        <div>
+          <label>Desired expanded (preview)</label>
+          <pre id="rfDesiredExpanded" class="box"></pre>
+        </div>
+        <div>
+          <label>Target expanded (preview)</label>
+          <pre id="rfTargetExpanded" class="box"></pre>
         </div>
       </div>
       <div style="margin-top:8px;">
@@ -382,6 +402,34 @@ const adminDevicesPageHTML = `<!doctype html>
       return rows.join("\n");
     }
 
+    function isAbsPath(p) {
+      return /^([a-zA-Z]:[\\/]|\/)/.test(String(p || ""));
+    }
+
+    function trimSlash(v) {
+      return String(v || "").replace(/[\\/]+$/, "");
+    }
+
+    function joinPath(base, rel) {
+      const b = trimSlash(base);
+      const r = String(rel || "").replace(/^[./\\]+/, "");
+      if (!b) return r;
+      if (!r) return b;
+      return b + "/" + r;
+    }
+
+    function expandRuleFilesPreview(files, activeBase) {
+      const base = String(activeBase || "").trim();
+      return (files || []).map((raw) => {
+        let v = String(raw || "").trim();
+        if (!v) return v;
+        v = v.replaceAll("${MAMOTAMA_POLICY_ACTIVE}", base);
+        v = v.replaceAll("${POLICY_ACTIVE_LINK}", base);
+        if (!isAbsPath(v)) v = joinPath(base, v);
+        return v;
+      });
+    }
+
     function renderRuleFilesDiff() {
       const dev = selectedDeviceRecord();
       const currentVersion = (dev && dev.current_policy_version) || "";
@@ -403,8 +451,18 @@ const adminDevicesPageHTML = `<!doctype html>
       byId("rfDesired").textContent = fmtRuleFiles(desiredParsed.files, desiredParsed.error);
       byId("rfTarget").textContent = fmtRuleFiles(targetParsed.files, targetParsed.error);
 
+      const activeBase = byId("rfActiveBase").value.trim();
+      const currentExpanded = expandRuleFilesPreview(currentParsed.files, activeBase);
+      const desiredExpanded = expandRuleFilesPreview(desiredParsed.files, activeBase);
+      const targetExpanded = expandRuleFilesPreview(targetParsed.files, activeBase);
+      byId("rfCurrentExpanded").textContent = fmtRuleFiles(currentExpanded, currentParsed.error);
+      byId("rfDesiredExpanded").textContent = fmtRuleFiles(desiredExpanded, desiredParsed.error);
+      byId("rfTargetExpanded").textContent = fmtRuleFiles(targetExpanded, targetParsed.error);
+
       const d1 = diffRuleFiles(currentParsed.files, desiredParsed.files);
       const d2 = diffRuleFiles(currentParsed.files, targetParsed.files);
+      const d1x = diffRuleFiles(currentExpanded, desiredExpanded);
+      const d2x = diffRuleFiles(currentExpanded, targetExpanded);
       const lines = [];
       lines.push("[current -> desired]");
       lines.push("add: " + (d1.added.length ? d1.added.join(", ") : "(none)"));
@@ -413,6 +471,14 @@ const adminDevicesPageHTML = `<!doctype html>
       lines.push("[current -> target(edit)]");
       lines.push("add: " + (d2.added.length ? d2.added.join(", ") : "(none)"));
       lines.push("remove: " + (d2.removed.length ? d2.removed.join(", ") : "(none)"));
+      lines.push("");
+      lines.push("[expanded current -> expanded desired]");
+      lines.push("add: " + (d1x.added.length ? d1x.added.join(", ") : "(none)"));
+      lines.push("remove: " + (d1x.removed.length ? d1x.removed.join(", ") : "(none)"));
+      lines.push("");
+      lines.push("[expanded current -> expanded target(edit)]");
+      lines.push("add: " + (d2x.added.length ? d2x.added.join(", ") : "(none)"));
+      lines.push("remove: " + (d2x.removed.length ? d2x.removed.join(", ") : "(none)"));
       byId("rfDiffSummary").textContent = lines.join("\n");
     }
 
@@ -566,6 +632,7 @@ const adminDevicesPageHTML = `<!doctype html>
     };
 
     byId("version").oninput = () => renderRuleFilesDiff();
+    byId("rfActiveBase").oninput = () => renderRuleFilesDiff();
 
     refreshAll().catch(e => setErr(String(e.message || e)));
   </script>

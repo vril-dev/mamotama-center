@@ -85,6 +85,7 @@ Control plane for mamotama-edge.
 - `GET /admin/devices`
   - minimal TLS-only admin page for device list and policy operations
   - includes bundle `.conf` inspection/selection and selected-device `rule_files` diff (current/desired/target)
+  - supports placeholder expansion preview (`${MAMOTAMA_POLICY_ACTIVE}` / `${POLICY_ACTIVE_LINK}`)
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
