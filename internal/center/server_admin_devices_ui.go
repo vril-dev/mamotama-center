@@ -164,6 +164,14 @@ const adminDevicesPageHTML = `<!doctype html>
           <input id="rfActiveBase" value="/var/lib/mamotama-edge/policy-active" placeholder="/var/lib/mamotama-edge/policy-active">
           <div class="muted">Saved per device in browser localStorage.</div>
         </div>
+        <div style="min-width:280px;">
+          <label>Base Map Backup</label>
+          <div class="row">
+            <button id="rfExportBaseMap">Export JSON</button>
+            <button id="rfImportBaseMap" class="warn">Import JSON</button>
+          </div>
+          <input id="rfImportFile" type="file" accept="application/json,.json" style="display:none;">
+        </div>
       </div>
       <div class="grid">
         <div>
@@ -219,7 +227,7 @@ const adminDevicesPageHTML = `<!doctype html>
     byId("saveKey").onclick = () => localStorage.setItem(keyStore, byId("apiKey").value);
     byId("rfActiveBase").value = rfBaseDefault;
     try {
-      activeBaseByDevice = JSON.parse(localStorage.getItem(rfBaseStore) || "{}") || {};
+      activeBaseByDevice = sanitizeActiveBaseMap(JSON.parse(localStorage.getItem(rfBaseStore) || "{}") || {});
     } catch {
       activeBaseByDevice = {};
     }
@@ -242,6 +250,50 @@ const adminDevicesPageHTML = `<!doctype html>
       if (value) activeBaseByDevice[key] = value;
       else delete activeBaseByDevice[key];
       localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+    }
+
+    function sanitizeActiveBaseMap(input) {
+      const out = {};
+      const src = (input && typeof input === "object") ? input : {};
+      for (const [k, v] of Object.entries(src)) {
+        const key = String(k || "").trim();
+        const val = String(v || "").trim();
+        if (!key || !val) continue;
+        out[key] = val;
+      }
+      return out;
+    }
+
+    function exportActiveBaseMap() {
+      const payload = {
+        format: "center_policy_active_base_map/v1",
+        exported_at: new Date().toISOString(),
+        active_base_by_device: sanitizeActiveBaseMap(activeBaseByDevice),
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      a.href = URL.createObjectURL(blob);
+      a.download = "center-policy-active-base-map-" + stamp + ".json";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    async function importActiveBaseMapFile(file) {
+      if (!file) return;
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      let map = {};
+      if (parsed && typeof parsed === "object" && parsed.active_base_by_device && typeof parsed.active_base_by_device === "object") {
+        map = parsed.active_base_by_device;
+      } else {
+        map = parsed;
+      }
+      activeBaseByDevice = sanitizeActiveBaseMap(map);
+      localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+      loadActiveBaseForSelection();
+      renderRuleFilesDiff();
+      setOk("imported policy active base map entries: " + Object.keys(activeBaseByDevice).length);
     }
 
     function setErr(msg) { byId("err").textContent = msg || ""; }
@@ -634,6 +686,27 @@ const adminDevicesPageHTML = `<!doctype html>
         if (!device) throw new Error("select device first");
         await triggerDownload("/v1/devices/" + encodeURIComponent(device) + ":download-policy?state=current", device + "-current.waf");
       } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("rfExportBaseMap").onclick = () => {
+      try {
+        setErr(""); setOk("");
+        exportActiveBaseMap();
+        setOk("exported policy active base map");
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("rfImportBaseMap").onclick = () => {
+      byId("rfImportFile").click();
+    };
+
+    byId("rfImportFile").onchange = async (ev) => {
+      try {
+        setErr(""); setOk("");
+        const f = (ev.target.files || [])[0];
+        await importActiveBaseMapFile(f);
+      } catch (e) { setErr(String(e.message || e)); }
+      finally { byId("rfImportFile").value = ""; }
     };
 
     byId("bundleFile").onchange = async (ev) => {

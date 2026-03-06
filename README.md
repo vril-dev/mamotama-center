@@ -87,6 +87,7 @@ Control plane for mamotama-edge.
   - includes bundle `.conf` inspection/selection and selected-device `rule_files` diff (current/desired/target)
   - supports placeholder expansion preview (`${MAMOTAMA_POLICY_ACTIVE}` / `${POLICY_ACTIVE_LINK}`)
   - `Policy Active Base` preview path is saved per device in browser localStorage
+  - supports JSON export/import for per-device `Policy Active Base` map
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
