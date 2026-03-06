@@ -162,6 +162,7 @@ const adminDevicesPageHTML = `<!doctype html>
         <div style="min-width:420px; flex:1;">
           <label>Policy Active Base (preview expand)</label>
           <input id="rfActiveBase" value="/var/lib/mamotama-edge/policy-active" placeholder="/var/lib/mamotama-edge/policy-active">
+          <div class="muted">Saved per device in browser localStorage.</div>
         </div>
       </div>
       <div class="grid">
@@ -202,6 +203,8 @@ const adminDevicesPageHTML = `<!doctype html>
   <script>
     const byId = (id) => document.getElementById(id);
     const keyStore = "center_admin_api_key";
+    const rfBaseStore = "center_policy_active_base_by_device";
+    const rfBaseDefault = "/var/lib/mamotama-edge/policy-active";
     let selectedDevice = "";
     let selectedPolicy = "";
     let devicesCache = [];
@@ -210,9 +213,36 @@ const adminDevicesPageHTML = `<!doctype html>
     let appliedBy = {};
     let bundleB64 = "";
     let bundleSHA = "";
+    let activeBaseByDevice = {};
 
     byId("apiKey").value = localStorage.getItem(keyStore) || "";
     byId("saveKey").onclick = () => localStorage.setItem(keyStore, byId("apiKey").value);
+    byId("rfActiveBase").value = rfBaseDefault;
+    try {
+      activeBaseByDevice = JSON.parse(localStorage.getItem(rfBaseStore) || "{}") || {};
+    } catch {
+      activeBaseByDevice = {};
+    }
+
+    function activeBaseKeyForDevice(deviceID) {
+      const id = String(deviceID || "").trim();
+      return id || "__default__";
+    }
+
+    function loadActiveBaseForSelection() {
+      const key = activeBaseKeyForDevice(selectedDevice);
+      const fallback = String(activeBaseByDevice["__default__"] || rfBaseDefault).trim() || rfBaseDefault;
+      const value = String(activeBaseByDevice[key] || fallback).trim() || fallback;
+      byId("rfActiveBase").value = value;
+    }
+
+    function saveActiveBaseForSelection() {
+      const key = activeBaseKeyForDevice(selectedDevice);
+      const value = byId("rfActiveBase").value.trim();
+      if (value) activeBaseByDevice[key] = value;
+      else delete activeBaseByDevice[key];
+      localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+    }
 
     function setErr(msg) { byId("err").textContent = msg || ""; }
     function setOk(msg) { byId("ok").textContent = msg || ""; }
@@ -253,6 +283,7 @@ const adminDevicesPageHTML = `<!doctype html>
           selectedDevice = d.device_id || "";
           byId("selectedDevice").textContent = selectedDevice || "-";
           renderDevices();
+          loadActiveBaseForSelection();
           renderRuleFilesDiff();
         };
         tbody.appendChild(tr);
@@ -287,6 +318,7 @@ const adminDevicesPageHTML = `<!doctype html>
         byId("selectedDevice").textContent = selectedDevice || "-";
       }
       renderDevices();
+      loadActiveBaseForSelection();
       renderRuleFilesDiff();
       setActionOut(body);
     }
@@ -632,7 +664,10 @@ const adminDevicesPageHTML = `<!doctype html>
     };
 
     byId("version").oninput = () => renderRuleFilesDiff();
-    byId("rfActiveBase").oninput = () => renderRuleFilesDiff();
+    byId("rfActiveBase").oninput = () => {
+      saveActiveBaseForSelection();
+      renderRuleFilesDiff();
+    };
 
     refreshAll().catch(e => setErr(String(e.message || e)));
   </script>
