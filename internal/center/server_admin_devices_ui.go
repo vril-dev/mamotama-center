@@ -164,6 +164,16 @@ const adminDevicesPageHTML = `<!doctype html>
           <input id="rfActiveBase" value="/var/lib/mamotama-edge/policy-active" placeholder="/var/lib/mamotama-edge/policy-active">
           <div class="muted">Saved per device in browser localStorage.</div>
         </div>
+        <div style="min-width:360px; flex:1;">
+          <label>Base Map Profile</label>
+          <div class="row">
+            <select id="rfProfileSelect" style="min-width:140px;"></select>
+            <input id="rfProfileName" placeholder="profile-name" style="min-width:120px;">
+            <button id="rfProfileSave" class="warn">Save As</button>
+            <button id="rfProfileDelete" class="err">Delete</button>
+          </div>
+          <div class="muted">Switch profile to compare environments quickly.</div>
+        </div>
         <div style="min-width:280px;">
           <label>Base Map Backup</label>
           <div class="row">
@@ -212,6 +222,8 @@ const adminDevicesPageHTML = `<!doctype html>
     const byId = (id) => document.getElementById(id);
     const keyStore = "center_admin_api_key";
     const rfBaseStore = "center_policy_active_base_by_device";
+    const rfProfileStore = "center_policy_active_base_profiles_v1";
+    const rfDefaultProfile = "default";
     const rfBaseDefault = "/var/lib/mamotama-edge/policy-active";
     let selectedDevice = "";
     let selectedPolicy = "";
@@ -222,19 +234,24 @@ const adminDevicesPageHTML = `<!doctype html>
     let bundleB64 = "";
     let bundleSHA = "";
     let activeBaseByDevice = {};
+    let activeBaseProfiles = {};
+    let currentBaseProfile = rfDefaultProfile;
 
     byId("apiKey").value = localStorage.getItem(keyStore) || "";
     byId("saveKey").onclick = () => localStorage.setItem(keyStore, byId("apiKey").value);
+    hydrateActiveBaseState();
+    renderProfileControls();
     byId("rfActiveBase").value = rfBaseDefault;
-    try {
-      activeBaseByDevice = sanitizeActiveBaseMap(JSON.parse(localStorage.getItem(rfBaseStore) || "{}") || {});
-    } catch {
-      activeBaseByDevice = {};
-    }
 
     function activeBaseKeyForDevice(deviceID) {
       const id = String(deviceID || "").trim();
       return id || "__default__";
+    }
+
+    function sanitizeProfileName(raw) {
+      const base = String(raw || "").trim().replace(/\s+/g, "-");
+      const safe = base.replace(/[^a-zA-Z0-9._-]/g, "");
+      return safe;
     }
 
     function loadActiveBaseForSelection() {
@@ -249,7 +266,7 @@ const adminDevicesPageHTML = `<!doctype html>
       const value = byId("rfActiveBase").value.trim();
       if (value) activeBaseByDevice[key] = value;
       else delete activeBaseByDevice[key];
-      localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+      persistActiveBaseState();
     }
 
     function sanitizeActiveBaseMap(input) {
@@ -264,11 +281,113 @@ const adminDevicesPageHTML = `<!doctype html>
       return out;
     }
 
+    function sanitizeActiveBaseProfiles(input) {
+      const out = {};
+      const src = (input && typeof input === "object") ? input : {};
+      for (const [name, map] of Object.entries(src)) {
+        const safeName = sanitizeProfileName(name);
+        if (!safeName) continue;
+        out[safeName] = sanitizeActiveBaseMap(map);
+      }
+      return out;
+    }
+
+    function persistActiveBaseState() {
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseByDevice);
+      activeBaseProfiles[currentBaseProfile] = activeBaseByDevice;
+      const payload = {
+        format: "center_policy_active_base_profiles/v1",
+        current_profile: currentBaseProfile,
+        profiles: sanitizeActiveBaseProfiles(activeBaseProfiles),
+      };
+      localStorage.setItem(rfProfileStore, JSON.stringify(payload));
+      localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+    }
+
+    function hydrateActiveBaseState() {
+      activeBaseProfiles = {};
+      currentBaseProfile = rfDefaultProfile;
+      try {
+        const parsed = JSON.parse(localStorage.getItem(rfProfileStore) || "{}") || {};
+        const profiles = sanitizeActiveBaseProfiles(parsed.profiles || {});
+        if (Object.keys(profiles).length > 0) {
+          activeBaseProfiles = profiles;
+          const preferred = sanitizeProfileName(parsed.current_profile || "");
+          if (preferred && activeBaseProfiles[preferred]) currentBaseProfile = preferred;
+          else currentBaseProfile = Object.keys(activeBaseProfiles).sort()[0];
+        }
+      } catch {}
+
+      if (Object.keys(activeBaseProfiles).length === 0) {
+        let legacy = {};
+        try { legacy = sanitizeActiveBaseMap(JSON.parse(localStorage.getItem(rfBaseStore) || "{}") || {}); } catch {}
+        activeBaseProfiles[rfDefaultProfile] = legacy;
+        currentBaseProfile = rfDefaultProfile;
+      }
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseProfiles[currentBaseProfile] || {});
+      activeBaseProfiles[currentBaseProfile] = activeBaseByDevice;
+      persistActiveBaseState();
+    }
+
+    function renderProfileControls() {
+      const sel = byId("rfProfileSelect");
+      sel.innerHTML = "";
+      const names = Object.keys(activeBaseProfiles).sort();
+      for (const name of names) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        if (name === currentBaseProfile) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      byId("rfProfileName").value = currentBaseProfile;
+    }
+
+    function switchActiveBaseProfile(name) {
+      const safe = sanitizeProfileName(name);
+      if (!safe || !activeBaseProfiles[safe]) return;
+      currentBaseProfile = safe;
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseProfiles[safe] || {});
+      activeBaseProfiles[safe] = activeBaseByDevice;
+      persistActiveBaseState();
+      renderProfileControls();
+      loadActiveBaseForSelection();
+      renderRuleFilesDiff();
+    }
+
+    function saveAsActiveBaseProfile(name) {
+      const safe = sanitizeProfileName(name);
+      if (!safe) throw new Error("profile name is required");
+      activeBaseProfiles[safe] = sanitizeActiveBaseMap(activeBaseByDevice);
+      currentBaseProfile = safe;
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseProfiles[safe]);
+      persistActiveBaseState();
+      renderProfileControls();
+      loadActiveBaseForSelection();
+      renderRuleFilesDiff();
+    }
+
+    function deleteCurrentActiveBaseProfile() {
+      const names = Object.keys(activeBaseProfiles);
+      if (names.length <= 1) throw new Error("at least one profile is required");
+      delete activeBaseProfiles[currentBaseProfile];
+      const next = Object.keys(activeBaseProfiles).sort()[0] || rfDefaultProfile;
+      currentBaseProfile = next;
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseProfiles[next] || {});
+      activeBaseProfiles[next] = activeBaseByDevice;
+      persistActiveBaseState();
+      renderProfileControls();
+      loadActiveBaseForSelection();
+      renderRuleFilesDiff();
+    }
+
     function exportActiveBaseMap() {
       const payload = {
-        format: "center_policy_active_base_map/v1",
+        format: "center_policy_active_base_profiles/v1",
         exported_at: new Date().toISOString(),
-        active_base_by_device: sanitizeActiveBaseMap(activeBaseByDevice),
+        current_profile: currentBaseProfile,
+        profiles: sanitizeActiveBaseProfiles(activeBaseProfiles),
+        active_base_by_device: sanitizeActiveBaseMap(activeBaseByDevice), // legacy field
       };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const a = document.createElement("a");
@@ -283,17 +402,31 @@ const adminDevicesPageHTML = `<!doctype html>
       if (!file) return;
       const text = await file.text();
       const parsed = JSON.parse(text);
-      let map = {};
-      if (parsed && typeof parsed === "object" && parsed.active_base_by_device && typeof parsed.active_base_by_device === "object") {
-        map = parsed.active_base_by_device;
+      if (parsed && typeof parsed === "object" && parsed.profiles && typeof parsed.profiles === "object") {
+        activeBaseProfiles = sanitizeActiveBaseProfiles(parsed.profiles);
+        if (Object.keys(activeBaseProfiles).length === 0) {
+          throw new Error("imported profiles are empty");
+        }
+        const preferred = sanitizeProfileName(parsed.current_profile || "");
+        currentBaseProfile = preferred && activeBaseProfiles[preferred] ? preferred : Object.keys(activeBaseProfiles).sort()[0];
       } else {
-        map = parsed;
+        let map = {};
+        if (parsed && typeof parsed === "object" && parsed.active_base_by_device && typeof parsed.active_base_by_device === "object") {
+          map = parsed.active_base_by_device;
+        } else {
+          map = parsed;
+        }
+        activeBaseProfiles = {};
+        activeBaseProfiles[rfDefaultProfile] = sanitizeActiveBaseMap(map);
+        currentBaseProfile = rfDefaultProfile;
       }
-      activeBaseByDevice = sanitizeActiveBaseMap(map);
-      localStorage.setItem(rfBaseStore, JSON.stringify(activeBaseByDevice));
+      activeBaseByDevice = sanitizeActiveBaseMap(activeBaseProfiles[currentBaseProfile] || {});
+      activeBaseProfiles[currentBaseProfile] = activeBaseByDevice;
+      persistActiveBaseState();
+      renderProfileControls();
       loadActiveBaseForSelection();
       renderRuleFilesDiff();
-      setOk("imported policy active base map entries: " + Object.keys(activeBaseByDevice).length);
+      setOk("imported profile(s): " + Object.keys(activeBaseProfiles).length + ", current=" + currentBaseProfile);
     }
 
     function setErr(msg) { byId("err").textContent = msg || ""; }
@@ -581,6 +714,28 @@ const adminDevicesPageHTML = `<!doctype html>
     byId("refreshAll").onclick = () => refreshAll().catch(e => setErr(String(e.message || e)));
     byId("reloadDevices").onclick = () => loadDevices().catch(e => setErr(String(e.message || e)));
     byId("reloadPolicies").onclick = () => loadPolicies().catch(e => setErr(String(e.message || e)));
+    byId("rfProfileSelect").onchange = (ev) => {
+      try {
+        setErr(""); setOk("");
+        switchActiveBaseProfile(ev.target.value);
+        setOk("switched profile: " + currentBaseProfile);
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+    byId("rfProfileSave").onclick = () => {
+      try {
+        setErr(""); setOk("");
+        saveAsActiveBaseProfile(byId("rfProfileName").value);
+        setOk("saved profile: " + currentBaseProfile);
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+    byId("rfProfileDelete").onclick = () => {
+      try {
+        setErr(""); setOk("");
+        const deleting = currentBaseProfile;
+        deleteCurrentActiveBaseProfile();
+        setOk("deleted profile: " + deleting + " -> current=" + currentBaseProfile);
+      } catch (e) { setErr(String(e.message || e)); }
+    };
 
     byId("loadPolicy").onclick = async () => {
       try {
