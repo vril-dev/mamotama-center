@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mamotama-center devices</title>
+  <link rel="stylesheet" href="/admin/devices/assets/admin_devices.css">
+</head>
+<body>
+  <div class="wrap">
+    <h1>Center Admin Devices, Policies & Releases</h1>
+    <div class="panel">
+      <div class="row">
+        <div style="flex:1; min-width:280px;">
+          <label>Admin API Key (write key for mutate actions)</label>
+          <input id="apiKey" type="password" placeholder="X-API-Key">
+        </div>
+        <button id="saveKey">Save Key</button>
+        <button id="refreshAll">Refresh All</button>
+      </div>
+      <div class="muted">Read APIs: devices/policies/releases/list/download. Write APIs: policy/release create/overwrite/approve/delete, device assign.</div>
+      <div id="err" class="error"></div>
+      <div id="ok" class="ok"></div>
+    </div>
+
+    <div class="grid">
+      <div class="panel">
+        <h2>Devices</h2>
+        <div class="row">
+          <button id="reloadDevices">Reload Devices</button>
+          <span class="muted">Selected device: <span id="selectedDevice" class="mono">-</span></span>
+        </div>
+        <table id="devicesTable">
+          <thead>
+            <tr>
+              <th>device_id</th><th>status</th><th>policy(desired/current)</th><th>release(desired/current)</th><th>release apply_at</th><th>flagged</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>Policies</h2>
+        <div class="row">
+          <button id="reloadPolicies">Reload Policies</button>
+          <span class="muted">Selected policy: <span id="selectedPolicy" class="mono">-</span></span>
+        </div>
+        <table id="policiesTable">
+          <thead>
+            <tr>
+              <th>version</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>Releases</h2>
+        <div class="row">
+          <button id="reloadReleases">Reload Releases</button>
+          <span class="muted">Selected release: <span id="selectedRelease" class="mono">-</span></span>
+        </div>
+        <table id="releasesTable">
+          <thead>
+            <tr>
+              <th>version</th><th>platform</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>Policy Editor / Actions</h2>
+      <div class="row">
+        <div style="min-width:320px; flex:1;">
+          <label>Policy Version</label>
+          <input id="version" placeholder="waf-2026-03-06">
+        </div>
+        <div style="min-width:320px; flex:1;">
+          <label>Note</label>
+          <input id="note" placeholder="optional note">
+        </div>
+      </div>
+      <div class="row">
+        <div style="min-width:320px; flex:1;">
+          <label>Bundle (.tar.gz, optional)</label>
+          <input id="bundleFile" type="file" accept=".tar.gz,.tgz,application/gzip,application/x-gzip">
+        </div>
+        <div style="min-width:320px; flex:1;">
+          <label>Bundle SHA256 (auto)</label>
+          <input id="bundleSHA" readonly>
+        </div>
+        <div style="min-width:260px; flex:1;">
+          <label>WAF Raw Template (optional)</label>
+          <select id="wafTemplate">
+            <option value="">(none)</option>
+            <option value="bundle_default">bundle_default</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div style="min-width:420px; flex:1;">
+          <label>Bundle .conf Files (for template)</label>
+          <select id="bundleRuleFiles" multiple size="6" style="width:100%;"></select>
+        </div>
+      </div>
+      <div>
+        <label>WAF Raw</label>
+        <textarea id="wafRaw" placeholder='{"enabled":true,"rule_files":["${MAMOTAMA_POLICY_ACTIVE}/rules/mamotama.conf"]}'></textarea>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="loadPolicy">Load Policy</button>
+        <button id="createPolicy">Upload New (POST draft)</button>
+        <button id="overwritePolicy" class="warn">Overwrite (PUT draft)</button>
+        <button id="approvePolicy">Approve</button>
+        <button id="deletePolicy" class="err">Delete Unused</button>
+      </div>
+      <div class="row">
+        <button id="assignPolicy">Assign To Selected Device</button>
+        <button id="downloadDesired">Download Desired Rule</button>
+        <button id="downloadCurrent">Download Current Rule</button>
+      </div>
+      <div id="actionOut" class="mono"></div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>Release Editor / Actions</h2>
+      <div class="row">
+        <div style="min-width:260px; flex:1;">
+          <label>Release Version</label>
+          <input id="releaseVersion" placeholder="edge-0.5.1">
+        </div>
+        <div style="min-width:220px; flex:1;">
+          <label>Platform</label>
+          <input id="releasePlatform" placeholder="linux-amd64">
+        </div>
+        <div style="min-width:320px; flex:1;">
+          <label>Note</label>
+          <input id="releaseNote" placeholder="optional note">
+        </div>
+      </div>
+      <div class="row">
+        <div style="min-width:340px; flex:1;">
+          <label>Release Binary (required for upload/overwrite)</label>
+          <input id="releaseBinaryFile" type="file">
+        </div>
+        <div style="min-width:340px; flex:1;">
+          <label>Binary SHA256 (auto)</label>
+          <input id="releaseSHA" readonly>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="loadRelease">Load Release</button>
+        <button id="createRelease">Upload New (POST draft)</button>
+        <button id="overwriteRelease" class="warn">Overwrite (PUT draft)</button>
+        <button id="approveRelease">Approve</button>
+        <button id="deleteRelease" class="err">Delete Unused</button>
+      </div>
+      <div class="row">
+        <button id="assignRelease">Assign Release To Selected Device</button>
+        <div style="min-width:340px; flex:1;">
+          <label>Apply At (optional RFC3339)</label>
+          <input id="releaseApplyAt" placeholder="2026-03-08T02:00:00Z">
+        </div>
+      </div>
+      <div id="releaseActionOut" class="mono"></div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>Rule Files Diff (Selected Device)</h2>
+      <div class="row">
+        <span class="muted">current: <span id="rfCurrentVersion" class="mono">-</span></span>
+        <span class="muted">desired: <span id="rfDesiredVersion" class="mono">-</span></span>
+        <span class="muted">target(edit): <span id="rfTargetVersion" class="mono">-</span></span>
+      </div>
+      <div class="row">
+        <div style="min-width:420px; flex:1;">
+          <label>Policy Active Base (preview expand)</label>
+          <input id="rfActiveBase" value="/var/lib/mamotama-edge/policy-active" placeholder="/var/lib/mamotama-edge/policy-active">
+          <div class="muted">Saved per device in browser localStorage.</div>
+        </div>
+        <div style="min-width:360px; flex:1;">
+          <label>Base Map Profile</label>
+          <div class="row">
+            <select id="rfProfileSelect" style="min-width:140px;"></select>
+            <input id="rfProfileName" placeholder="profile-name" style="min-width:120px;">
+            <button id="rfProfileSave" class="warn">Save As</button>
+            <button id="rfProfileDelete" class="err">Delete</button>
+          </div>
+          <div class="muted">Switch profile to compare environments quickly.</div>
+        </div>
+        <div style="min-width:280px;">
+          <label>Base Map Backup</label>
+          <div class="row">
+            <button id="rfExportBaseMap">Export JSON</button>
+            <button id="rfImportBaseMap" class="warn">Import JSON</button>
+          </div>
+          <input id="rfImportFile" type="file" accept="application/json,.json" style="display:none;">
+        </div>
+      </div>
+      <div class="row">
+        <div style="min-width:360px; flex:1;">
+          <label>Profile Diff Compare</label>
+          <select id="rfProfileCompare" style="min-width:180px;"></select>
+          <div class="muted">Compares active-base map entries against current profile.</div>
+        </div>
+        <div style="min-width:260px; flex:1;">
+          <label>Profile Diff Filter</label>
+          <select id="rfProfileDiffFilter" style="min-width:180px;">
+            <option value="all">all differences</option>
+            <option value="changed">only changed values</option>
+            <option value="missing_current">missing in current</option>
+            <option value="missing_compare">missing in compare</option>
+          </select>
+        </div>
+        <div style="min-width:260px; flex:1;">
+          <label>Profile Diff Search</label>
+          <input id="rfProfileDiffSearch" placeholder="search by key or value">
+        </div>
+        <div style="min-width:220px; flex:1;">
+          <label>Profile Diff Sort</label>
+          <select id="rfProfileDiffSort" style="min-width:180px;">
+            <option value="key_asc">key asc</option>
+            <option value="key_desc">key desc</option>
+            <option value="type_key">type then key</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Profile Map Diff Table</label>
+        <table id="rfProfileDiffTable">
+          <thead>
+            <tr>
+              <th>device key</th>
+              <th>type</th>
+              <th>current</th>
+              <th>compare</th>
+            </tr>
+          </thead>
+          <tbody id="rfProfileDiffTableBody"></tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Profile Map Diff</label>
+        <pre id="rfProfileDiffSummary" class="box"></pre>
+      </div>
+      <div class="grid">
+        <div>
+          <label>Current rule_files</label>
+          <pre id="rfCurrent" class="box"></pre>
+        </div>
+        <div>
+          <label>Desired rule_files</label>
+          <pre id="rfDesired" class="box"></pre>
+        </div>
+        <div>
+          <label>Target(edit) rule_files</label>
+          <pre id="rfTarget" class="box"></pre>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:8px;">
+        <div>
+          <label>Current expanded (preview)</label>
+          <pre id="rfCurrentExpanded" class="box"></pre>
+        </div>
+        <div>
+          <label>Desired expanded (preview)</label>
+          <pre id="rfDesiredExpanded" class="box"></pre>
+        </div>
+        <div>
+          <label>Target expanded (preview)</label>
+          <pre id="rfTargetExpanded" class="box"></pre>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Diff Summary</label>
+        <pre id="rfDiffSummary" class="box"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="/admin/devices/assets/admin_devices.js"></script>
+</body>
+</html>
