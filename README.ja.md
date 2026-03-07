@@ -43,6 +43,7 @@
   - 端末状態一覧/詳細
 - `POST /v1/devices/{id}:assign-policy|assign-release|revoke|retire`
   - 割り当て/失効/退役
+  - `assign-release` は任意 `apply_at`（RFC3339）で適用開始時刻を指定可能
 - `GET /v1/admin/logs/*`
   - ログ一覧/集計/ダウンロード
 

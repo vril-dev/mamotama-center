@@ -71,6 +71,7 @@ Control plane for mamotama-edge.
 - `POST /v1/devices/{device_id}:assign-release`
   - header `X-API-Key` required
   - sets device desired release version (approved release only)
+  - optional `apply_at` (RFC3339): center delays `update_required=true` until this time
 - `GET /v1/devices/{device_id}:download-policy`
   - header `X-API-Key` required
   - downloads device policy rule (`state=desired|current`, `format=raw|json`)

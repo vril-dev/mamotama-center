@@ -1213,6 +1213,156 @@ func TestReleaseAssignPullAckFlow(t *testing.T) {
 	}
 }
 
+func TestReleaseAssignWithApplyAtDelaysUpdate(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+	releaseRaw := []byte("test-edge-binary-v0.5.1")
+	releaseB64 := base64.StdEncoding.EncodeToString(releaseRaw)
+	releaseSHA := hashBytesHex(releaseRaw)
+	applyAt := baseTS.Add(2 * time.Hour).UTC()
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-release-scheduled", key, baseTS, "release-enroll-scheduled-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	putReleaseBody, err := json.Marshal(map[string]any{
+		"version":    "edge-0.5.1",
+		"platform":   "linux-amd64",
+		"sha256":     releaseSHA,
+		"binary_b64": releaseB64,
+		"note":       "ota-scheduled-test",
+	})
+	if err != nil {
+		t.Fatalf("marshal release upsert payload: %v", err)
+	}
+	putReleaseReq := httptest.NewRequest(http.MethodPost, "/v1/releases", bytes.NewReader(putReleaseBody))
+	addAdminAPIKey(putReleaseReq)
+	putReleaseRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putReleaseRes, putReleaseReq)
+	if putReleaseRes.Code != http.StatusOK {
+		t.Fatalf("release upsert failed: %d body=%s", putReleaseRes.Code, putReleaseRes.Body.String())
+	}
+
+	approveReq := httptest.NewRequest(http.MethodPost, "/v1/releases/edge-0.5.1:approve", nil)
+	addAdminAPIKey(approveReq)
+	approveRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(approveRes, approveReq)
+	if approveRes.Code != http.StatusOK {
+		t.Fatalf("approve release failed: %d body=%s", approveRes.Code, approveRes.Body.String())
+	}
+
+	assignBody, err := json.Marshal(map[string]any{
+		"version":  "edge-0.5.1",
+		"apply_at": applyAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("marshal assign body: %v", err)
+	}
+	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-release-scheduled:assign-release", bytes.NewReader(assignBody))
+	addAdminAPIKey(assignReq)
+	assignRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignRes, assignReq)
+	if assignRes.Code != http.StatusOK {
+		t.Fatalf("assign release failed: %d body=%s", assignRes.Code, assignRes.Body.String())
+	}
+	var assignResp struct {
+		Release struct {
+			ApplyAt string `json:"apply_at"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(assignRes.Body.Bytes(), &assignResp); err != nil {
+		t.Fatalf("decode assign response: %v", err)
+	}
+	if assignResp.Release.ApplyAt == "" {
+		t.Fatalf("expected apply_at in assign response: %s", assignRes.Body.String())
+	}
+
+	srv.nowFn = func() time.Time { return baseTS.Add(1 * time.Minute) }
+	hbReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-release-scheduled", key, baseTS.Add(1*time.Minute), "release-hb-scheduled-1", "")))
+	hbRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes, hbReq)
+	if hbRes.Code != http.StatusOK {
+		t.Fatalf("heartbeat before apply_at failed: %d body=%s", hbRes.Code, hbRes.Body.String())
+	}
+	var hbBody map[string]any
+	if err := json.Unmarshal(hbRes.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode heartbeat body: %v", err)
+	}
+	releaseInfo, _ := hbBody["release"].(map[string]any)
+	if updateRequired, _ := releaseInfo["update_required"].(bool); updateRequired {
+		t.Fatalf("expected update_required=false before apply_at, body=%s", hbRes.Body.String())
+	}
+	if ready, _ := releaseInfo["update_ready"].(bool); ready {
+		t.Fatalf("expected update_ready=false before apply_at, body=%s", hbRes.Body.String())
+	}
+
+	pullReq := httptest.NewRequest(http.MethodPost, "/v1/release/pull", bytes.NewReader(signedReleasePullPayload(t, "device-release-scheduled", key, baseTS.Add(2*time.Minute), "release-pull-scheduled-1", "", "")))
+	pullRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pullRes, pullReq)
+	if pullRes.Code != http.StatusOK {
+		t.Fatalf("release pull before apply_at failed: %d body=%s", pullRes.Code, pullRes.Body.String())
+	}
+	var pullBody struct {
+		UpdateRequired bool `json:"update_required"`
+	}
+	if err := json.Unmarshal(pullRes.Body.Bytes(), &pullBody); err != nil {
+		t.Fatalf("decode release pull body before apply_at: %v", err)
+	}
+	if pullBody.UpdateRequired {
+		t.Fatalf("expected release pull update_required=false before apply_at, body=%s", pullRes.Body.String())
+	}
+
+	srv.nowFn = func() time.Time { return applyAt.Add(1 * time.Minute) }
+	hbReq2 := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-release-scheduled", key, applyAt.Add(time.Minute), "release-hb-scheduled-2", "")))
+	hbRes2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes2, hbReq2)
+	if hbRes2.Code != http.StatusOK {
+		t.Fatalf("heartbeat after apply_at failed: %d body=%s", hbRes2.Code, hbRes2.Body.String())
+	}
+	if err := json.Unmarshal(hbRes2.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode heartbeat body after apply_at: %v", err)
+	}
+	releaseInfo, _ = hbBody["release"].(map[string]any)
+	if updateRequired, _ := releaseInfo["update_required"].(bool); !updateRequired {
+		t.Fatalf("expected update_required=true after apply_at, body=%s", hbRes2.Body.String())
+	}
+
+	pullReq2 := httptest.NewRequest(http.MethodPost, "/v1/release/pull", bytes.NewReader(signedReleasePullPayload(t, "device-release-scheduled", key, applyAt.Add(2*time.Minute), "release-pull-scheduled-2", "", "")))
+	pullRes2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pullRes2, pullReq2)
+	if pullRes2.Code != http.StatusOK {
+		t.Fatalf("release pull after apply_at failed: %d body=%s", pullRes2.Code, pullRes2.Body.String())
+	}
+	var pullBody2 struct {
+		UpdateRequired bool `json:"update_required"`
+		Release        struct {
+			Version string `json:"version"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(pullRes2.Body.Bytes(), &pullBody2); err != nil {
+		t.Fatalf("decode release pull body after apply_at: %v", err)
+	}
+	if !pullBody2.UpdateRequired {
+		t.Fatalf("expected release pull update_required=true after apply_at, body=%s", pullRes2.Body.String())
+	}
+	if pullBody2.Release.Version != "edge-0.5.1" {
+		t.Fatalf("unexpected release version after apply_at: %s", pullRes2.Body.String())
+	}
+}
+
 func TestPolicyUpsertWithBundleTemplate(t *testing.T) {
 	t.Parallel()
 

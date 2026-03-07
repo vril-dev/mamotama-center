@@ -100,6 +100,7 @@ type policyAssignRequest struct {
 
 type releaseAssignRequest struct {
 	Version string `json:"version"`
+	ApplyAt string `json:"apply_at,omitempty"`
 }
 
 type policyPullRequest struct {
@@ -511,7 +512,8 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updateRequired := saved.DesiredPolicyVersion != "" && (saved.CurrentPolicyVersion != saved.DesiredPolicyVersion || !secureTextEqual(saved.CurrentPolicySHA256, saved.DesiredPolicySHA256))
-	releaseUpdateRequired := saved.DesiredReleaseVersion != "" && (saved.CurrentReleaseVersion != saved.DesiredReleaseVersion || !secureTextEqual(saved.CurrentReleaseSHA256, saved.DesiredReleaseSHA256))
+	releaseReady := releaseScheduleReached(saved.DesiredReleaseNotBeforeAt, now)
+	releaseUpdateRequired := saved.DesiredReleaseVersion != "" && releaseReady && (saved.CurrentReleaseVersion != saved.DesiredReleaseVersion || !secureTextEqual(saved.CurrentReleaseSHA256, saved.DesiredReleaseSHA256))
 	policy := map[string]any{
 		"desired_version":  saved.DesiredPolicyVersion,
 		"desired_sha256":   saved.DesiredPolicySHA256,
@@ -526,14 +528,16 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		policy["fetch_path"] = "/v1/policy/pull"
 	}
 	release := map[string]any{
-		"desired_version":  saved.DesiredReleaseVersion,
-		"desired_sha256":   saved.DesiredReleaseSHA256,
-		"desired_assigned": saved.DesiredReleaseAssignedAt,
-		"current_version":  saved.CurrentReleaseVersion,
-		"current_sha256":   saved.CurrentReleaseSHA256,
-		"last_sync_at":     saved.LastReleaseSyncAt,
-		"update_required":  releaseUpdateRequired,
-		"fetch_path":       "",
+		"desired_version":    saved.DesiredReleaseVersion,
+		"desired_sha256":     saved.DesiredReleaseSHA256,
+		"desired_assigned":   saved.DesiredReleaseAssignedAt,
+		"desired_not_before": saved.DesiredReleaseNotBeforeAt,
+		"update_ready":       releaseReady,
+		"current_version":    saved.CurrentReleaseVersion,
+		"current_sha256":     saved.CurrentReleaseSHA256,
+		"last_sync_at":       saved.LastReleaseSyncAt,
+		"update_required":    releaseUpdateRequired,
+		"fetch_path":         "",
 	}
 	if releaseUpdateRequired {
 		release["fetch_path"] = "/v1/release/pull"
@@ -1219,17 +1223,20 @@ func (s *Server) handleReleasePull(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	updateRequired := rec.DesiredReleaseVersion != "" && (rec.CurrentReleaseVersion != rec.DesiredReleaseVersion || !secureTextEqual(rec.CurrentReleaseSHA256, rec.DesiredReleaseSHA256))
+	releaseReady := releaseScheduleReached(rec.DesiredReleaseNotBeforeAt, now)
+	updateRequired := rec.DesiredReleaseVersion != "" && releaseReady && (rec.CurrentReleaseVersion != rec.DesiredReleaseVersion || !secureTextEqual(rec.CurrentReleaseSHA256, rec.DesiredReleaseSHA256))
 	if !updateRequired {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":          "ok",
 			"device_id":       rec.DeviceID,
 			"update_required": false,
 			"release": map[string]any{
-				"desired_version": rec.DesiredReleaseVersion,
-				"desired_sha256":  rec.DesiredReleaseSHA256,
-				"current_version": rec.CurrentReleaseVersion,
-				"current_sha256":  rec.CurrentReleaseSHA256,
+				"desired_version":    rec.DesiredReleaseVersion,
+				"desired_sha256":     rec.DesiredReleaseSHA256,
+				"desired_not_before": rec.DesiredReleaseNotBeforeAt,
+				"update_ready":       releaseReady,
+				"current_version":    rec.CurrentReleaseVersion,
+				"current_sha256":     rec.CurrentReleaseSHA256,
 			},
 			"device_status": s.buildDeviceStatus(rec, now),
 		})
@@ -1257,6 +1264,7 @@ func (s *Server) handleReleasePull(w http.ResponseWriter, r *http.Request) {
 			"created_at":   rel.CreatedAt,
 			"updated_at":   rel.UpdatedAt,
 			"assigned_at":  rec.DesiredReleaseAssignedAt,
+			"not_before":   rec.DesiredReleaseNotBeforeAt,
 			"current_seen": rec.CurrentReleaseVersion,
 		},
 		"device_status": s.buildDeviceStatus(rec, now),
@@ -1707,13 +1715,24 @@ func (s *Server) handleAssignDesiredRelease(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	req.Version = normalizePolicyVersion(req.Version)
+	req.ApplyAt = strings.TrimSpace(req.ApplyAt)
 	if req.Version == "" {
 		writeError(w, http.StatusBadRequest, "version is required")
 		return
 	}
+	var applyAt *time.Time
+	if req.ApplyAt != "" {
+		ts, ok := parseRFC3339Any(req.ApplyAt)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "apply_at must be RFC3339")
+			return
+		}
+		ts = ts.UTC()
+		applyAt = &ts
+	}
 
 	now := s.nowFn().UTC()
-	saved, rel, err := s.store.assignDesiredRelease(deviceID, req.Version, now)
+	saved, rel, err := s.store.assignDesiredRelease(deviceID, req.Version, now, applyAt)
 	if err != nil {
 		if errors.Is(err, errStoreInvalid) {
 			writeError(w, http.StatusBadRequest, "version is invalid")
@@ -1743,6 +1762,7 @@ func (s *Server) handleAssignDesiredRelease(w http.ResponseWriter, r *http.Reque
 			"platform":    rel.Platform,
 			"sha256":      rel.SHA256,
 			"assigned_at": saved.DesiredReleaseAssignedAt,
+			"apply_at":    saved.DesiredReleaseNotBeforeAt,
 		},
 		"device_status": s.buildDeviceStatus(saved, now),
 	})
@@ -2002,6 +2022,19 @@ func parseRFC3339Any(raw string) (time.Time, bool) {
 		return ts.UTC(), true
 	}
 	return time.Time{}, false
+}
+
+func releaseScheduleReached(notBeforeRaw string, now time.Time) bool {
+	notBeforeRaw = strings.TrimSpace(notBeforeRaw)
+	if notBeforeRaw == "" {
+		return true
+	}
+	ts, ok := parseRFC3339Any(notBeforeRaw)
+	if !ok {
+		// Keep update available if persisted value is malformed.
+		return true
+	}
+	return !now.UTC().Before(ts.UTC())
 }
 
 func allowKeyRotation(raw string) bool {

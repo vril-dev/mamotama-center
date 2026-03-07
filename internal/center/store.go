@@ -95,6 +95,7 @@ type DeviceRecord struct {
 	DesiredReleaseVersion      string             `json:"desired_release_version,omitempty"`
 	DesiredReleaseSHA256       string             `json:"desired_release_sha256,omitempty"`
 	DesiredReleaseAssignedAt   string             `json:"desired_release_assigned_at,omitempty"`
+	DesiredReleaseNotBeforeAt  string             `json:"desired_release_not_before_at,omitempty"`
 	CurrentReleaseVersion      string             `json:"current_release_version,omitempty"`
 	CurrentReleaseSHA256       string             `json:"current_release_sha256,omitempty"`
 	LastReleaseSyncAt          string             `json:"last_release_sync_at,omitempty"`
@@ -222,6 +223,7 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		rec.LastPolicyAckStatus = strings.TrimSpace(strings.ToLower(rec.LastPolicyAckStatus))
 		rec.DesiredReleaseVersion = normalizePolicyVersion(rec.DesiredReleaseVersion)
 		rec.DesiredReleaseSHA256 = strings.ToLower(strings.TrimSpace(rec.DesiredReleaseSHA256))
+		rec.DesiredReleaseNotBeforeAt = strings.TrimSpace(rec.DesiredReleaseNotBeforeAt)
 		rec.CurrentReleaseVersion = normalizePolicyVersion(rec.CurrentReleaseVersion)
 		rec.CurrentReleaseSHA256 = strings.ToLower(strings.TrimSpace(rec.CurrentReleaseSHA256))
 		rec.LastReleaseAckStatus = strings.TrimSpace(strings.ToLower(rec.LastReleaseAckStatus))
@@ -829,6 +831,7 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 		rec.DesiredReleaseVersion = prev.DesiredReleaseVersion
 		rec.DesiredReleaseSHA256 = prev.DesiredReleaseSHA256
 		rec.DesiredReleaseAssignedAt = prev.DesiredReleaseAssignedAt
+		rec.DesiredReleaseNotBeforeAt = prev.DesiredReleaseNotBeforeAt
 		rec.CurrentReleaseVersion = prev.CurrentReleaseVersion
 		rec.CurrentReleaseSHA256 = prev.CurrentReleaseSHA256
 		rec.LastReleaseSyncAt = prev.LastReleaseSyncAt
@@ -913,7 +916,7 @@ func (s *deviceStore) assignDesiredPolicy(deviceID, version string, assignedAt t
 	return rec, pol, nil
 }
 
-func (s *deviceStore) assignDesiredRelease(deviceID, version string, assignedAt time.Time) (DeviceRecord, ReleaseRecord, error) {
+func (s *deviceStore) assignDesiredRelease(deviceID, version string, assignedAt time.Time, notBefore *time.Time) (DeviceRecord, ReleaseRecord, error) {
 	version = normalizePolicyVersion(version)
 	if version == "" {
 		return DeviceRecord{}, ReleaseRecord{}, errStoreInvalid
@@ -936,6 +939,10 @@ func (s *deviceStore) assignDesiredRelease(deviceID, version string, assignedAt 
 	rec.DesiredReleaseVersion = rel.Version
 	rec.DesiredReleaseSHA256 = rel.SHA256
 	rec.DesiredReleaseAssignedAt = assignedAt.UTC().Format(time.RFC3339Nano)
+	rec.DesiredReleaseNotBeforeAt = ""
+	if notBefore != nil && !notBefore.IsZero() {
+		rec.DesiredReleaseNotBeforeAt = notBefore.UTC().Format(time.RFC3339Nano)
+	}
 	s.devices[deviceID] = rec
 	if err := s.saveLocked(); err != nil {
 		return DeviceRecord{}, ReleaseRecord{}, err
