@@ -10,7 +10,7 @@ Control plane for mamotama-edge.
 - heartbeat verification
 - persistent device registry management
 
-## Current Scope (0.1.x)
+## Current Scope (0.2.x)
 
 - `POST /v1/enroll`
   - header `X-License-Key` required
@@ -24,7 +24,7 @@ Control plane for mamotama-edge.
   - verifies Ed25519 signature using enrolled public key
   - applies timestamp skew and replay checks (`timestamp` + `nonce`)
   - accepts edge-reported `current_policy_version`, `current_policy_sha256`
-  - returns desired/current policy state and `update_required`
+  - returns desired/current policy state and desired/current release state with `update_required`
 - `GET /v1/policies`
   - header `X-API-Key` required
   - lists policy versions and desired/current usage summary
@@ -38,6 +38,24 @@ Control plane for mamotama-edge.
 - `POST /v1/policies/{version}:approve`
   - header `X-API-Key` required
   - marks policy status as `approved` (required before assignment)
+- `GET /v1/releases`
+  - header `X-API-Key` required
+  - lists release versions and desired/current usage summary
+- `POST /v1/releases`
+  - header `X-API-Key` required
+  - upserts immutable release payload (`version`, `platform`, `binary_b64`, optional `sha256`, `note`) as `draft`
+- `POST /v1/releases/{version}:approve`
+  - header `X-API-Key` required
+  - marks release status as `approved` (required before assignment)
+- `GET /v1/releases/{version}`
+  - header `X-API-Key` required
+  - returns one release and device usage counters
+- `PUT /v1/releases/{version}`
+  - header `X-API-Key` required
+  - overwrites release content as `draft` (only when release is unused)
+- `DELETE /v1/releases/{version}`
+  - header `X-API-Key` required
+  - deletes release (only when release is unused)
 - `GET /v1/policies/{version}`
   - header `X-API-Key` required
   - returns one policy and device usage counters
@@ -50,6 +68,9 @@ Control plane for mamotama-edge.
 - `POST /v1/devices/{device_id}:assign-policy`
   - header `X-API-Key` required
   - sets device desired policy version (approved policy only)
+- `POST /v1/devices/{device_id}:assign-release`
+  - header `X-API-Key` required
+  - sets device desired release version (approved release only)
 - `GET /v1/devices/{device_id}:download-policy`
   - header `X-API-Key` required
   - downloads device policy rule (`state=desired|current`, `format=raw|json`)
@@ -57,6 +78,10 @@ Control plane for mamotama-edge.
   - signed edge request to fetch assigned policy when update is required (`waf_raw` + optional bundle payload)
 - `POST /v1/policy/ack`
   - signed edge request to report `applied|failed|rolled_back`
+- `POST /v1/release/pull`
+  - signed edge request to fetch assigned release when update is required (`platform`, `sha256`, `binary_b64`)
+- `POST /v1/release/ack`
+  - signed edge request to report release apply result `applied|failed`
 - `POST /v1/logs/push`
   - signed edge request to upload gzip-compressed ndjson log batch
 - `POST /v1/devices/{device_id}:revoke`

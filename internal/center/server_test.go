@@ -166,6 +166,48 @@ func signedPolicyAckPayload(t *testing.T, deviceID string, key testDeviceKey, ts
 	return b
 }
 
+func signedReleasePullPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, currentVersion string, currentSHA string) []byte {
+	t.Helper()
+	req := releasePullRequest{
+		DeviceID:              deviceID,
+		KeyID:                 key.KeyID,
+		Timestamp:             ts.UTC().Format(time.RFC3339Nano),
+		Nonce:                 nonce,
+		CurrentReleaseVersion: normalizePolicyVersion(currentVersion),
+		CurrentReleaseSHA256:  currentSHA,
+	}
+	req.BodyHash = hashStringHex(releasePullBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal release pull payload: %v", err)
+	}
+	return b
+}
+
+func signedReleaseAckPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, version string, sha string, resultStatus string, message string) []byte {
+	t.Helper()
+	req := releaseAckRequest{
+		DeviceID:       deviceID,
+		KeyID:          key.KeyID,
+		Timestamp:      ts.UTC().Format(time.RFC3339Nano),
+		Nonce:          nonce,
+		ReleaseVersion: normalizePolicyVersion(version),
+		ReleaseSHA256:  sha,
+		ResultStatus:   resultStatus,
+		Message:        message,
+	}
+	req.BodyHash = hashStringHex(releaseAckBodyCanonical(req))
+	signature := ed25519.Sign(key.Private, []byte(signedEnvelopeMessage(req.DeviceID, req.KeyID, req.Timestamp, req.Nonce, req.BodyHash)))
+	req.SignatureB64 = base64.StdEncoding.EncodeToString(signature)
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal release ack payload: %v", err)
+	}
+	return b
+}
+
 func signedLogsPushPayload(t *testing.T, deviceID string, key testDeviceKey, ts time.Time, nonce string, entryCount int, payload []byte) []byte {
 	t.Helper()
 	req := logsPushRequest{
@@ -1031,6 +1073,143 @@ func TestPolicyAssignPullAckFlow(t *testing.T) {
 	policyInfo, _ = hbBody["policy"].(map[string]any)
 	if updateRequired, _ := policyInfo["update_required"].(bool); updateRequired {
 		t.Fatalf("expected update_required=false after applied ack, body=%s", hbRes2.Body.String())
+	}
+}
+
+func TestReleaseAssignPullAckFlow(t *testing.T) {
+	t.Parallel()
+
+	cfg := newSignedTestConfig(t)
+	cfg.Heartbeat.MaxClockSkew.Duration = 10 * time.Minute
+	srv, err := NewServer(cfg, log.New(bytes.NewBuffer(nil), "", 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	key := newTestDeviceKey(t)
+	baseTS := time.Now().UTC()
+	releaseRaw := []byte("test-edge-binary-v0.5.0")
+	releaseB64 := base64.StdEncoding.EncodeToString(releaseRaw)
+	releaseSHA := hashBytesHex(releaseRaw)
+
+	enrollReq := httptest.NewRequest(http.MethodPost, "/v1/enroll", bytes.NewReader(signedEnrollPayload(t, "device-release", key, baseTS, "release-enroll-1")))
+	enrollReq.Header.Set("X-License-Key", "test-license-key-1234")
+	enrollRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(enrollRes, enrollReq)
+	if enrollRes.Code != http.StatusOK {
+		t.Fatalf("enroll failed: %d body=%s", enrollRes.Code, enrollRes.Body.String())
+	}
+
+	putReleaseBody, err := json.Marshal(map[string]any{
+		"version":    "edge-0.5.0",
+		"platform":   "linux-amd64",
+		"sha256":     releaseSHA,
+		"binary_b64": releaseB64,
+		"note":       "ota-test",
+	})
+	if err != nil {
+		t.Fatalf("marshal release upsert payload: %v", err)
+	}
+	putReleaseReq := httptest.NewRequest(http.MethodPost, "/v1/releases", bytes.NewReader(putReleaseBody))
+	addAdminAPIKey(putReleaseReq)
+	putReleaseRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(putReleaseRes, putReleaseReq)
+	if putReleaseRes.Code != http.StatusOK {
+		t.Fatalf("release upsert failed: %d body=%s", putReleaseRes.Code, putReleaseRes.Body.String())
+	}
+	var putBody struct {
+		Release ReleaseRecord `json:"release"`
+	}
+	if err := json.Unmarshal(putReleaseRes.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decode release upsert body: %v", err)
+	}
+	if putBody.Release.Status != "draft" {
+		t.Fatalf("expected draft release after upsert, got status=%q", putBody.Release.Status)
+	}
+
+	assignDraftReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-release:assign-release", bytes.NewBufferString(`{"version":"edge-0.5.0"}`))
+	addAdminAPIKey(assignDraftReq)
+	assignDraftRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignDraftRes, assignDraftReq)
+	if assignDraftRes.Code != http.StatusConflict {
+		t.Fatalf("expected conflict while release is draft, got %d body=%s", assignDraftRes.Code, assignDraftRes.Body.String())
+	}
+
+	approveReq := httptest.NewRequest(http.MethodPost, "/v1/releases/edge-0.5.0:approve", nil)
+	addAdminAPIKey(approveReq)
+	approveRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(approveRes, approveReq)
+	if approveRes.Code != http.StatusOK {
+		t.Fatalf("approve release failed: %d body=%s", approveRes.Code, approveRes.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/v1/devices/device-release:assign-release", bytes.NewBufferString(`{"version":"edge-0.5.0"}`))
+	addAdminAPIKey(assignReq)
+	assignRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(assignRes, assignReq)
+	if assignRes.Code != http.StatusOK {
+		t.Fatalf("assign release failed: %d body=%s", assignRes.Code, assignRes.Body.String())
+	}
+
+	hbReq := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-release", key, baseTS.Add(time.Second), "release-hb-1", "")))
+	hbRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes, hbReq)
+	if hbRes.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d body=%s", hbRes.Code, hbRes.Body.String())
+	}
+	var hbBody map[string]any
+	if err := json.Unmarshal(hbRes.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode heartbeat body: %v", err)
+	}
+	releaseInfo, _ := hbBody["release"].(map[string]any)
+	if updateRequired, _ := releaseInfo["update_required"].(bool); !updateRequired {
+		t.Fatalf("expected release update_required=true, body=%s", hbRes.Body.String())
+	}
+
+	pullReq := httptest.NewRequest(http.MethodPost, "/v1/release/pull", bytes.NewReader(signedReleasePullPayload(t, "device-release", key, baseTS.Add(2*time.Second), "release-pull-1", "", "")))
+	pullRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(pullRes, pullReq)
+	if pullRes.Code != http.StatusOK {
+		t.Fatalf("release pull failed: %d body=%s", pullRes.Code, pullRes.Body.String())
+	}
+	var pullBody struct {
+		UpdateRequired bool `json:"update_required"`
+		Release        struct {
+			Version   string `json:"version"`
+			Platform  string `json:"platform"`
+			SHA256    string `json:"sha256"`
+			BinaryB64 string `json:"binary_b64"`
+		} `json:"release"`
+	}
+	if err := json.Unmarshal(pullRes.Body.Bytes(), &pullBody); err != nil {
+		t.Fatalf("decode release pull body: %v", err)
+	}
+	if !pullBody.UpdateRequired {
+		t.Fatalf("expected release pull update_required=true, body=%s", pullRes.Body.String())
+	}
+	if pullBody.Release.Version != "edge-0.5.0" || pullBody.Release.SHA256 != releaseSHA || pullBody.Release.BinaryB64 == "" {
+		t.Fatalf("unexpected release pull body: %s", pullRes.Body.String())
+	}
+
+	ackReq := httptest.NewRequest(http.MethodPost, "/v1/release/ack", bytes.NewReader(signedReleaseAckPayload(t, "device-release", key, baseTS.Add(3*time.Second), "release-ack-1", pullBody.Release.Version, pullBody.Release.SHA256, "applied", "")))
+	ackRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(ackRes, ackReq)
+	if ackRes.Code != http.StatusOK {
+		t.Fatalf("release ack failed: %d body=%s", ackRes.Code, ackRes.Body.String())
+	}
+
+	hbReq2 := httptest.NewRequest(http.MethodPost, "/v1/heartbeat", bytes.NewReader(signedHeartbeatPayload(t, "device-release", key, baseTS.Add(4*time.Second), "release-hb-2", "")))
+	hbRes2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(hbRes2, hbReq2)
+	if hbRes2.Code != http.StatusOK {
+		t.Fatalf("second heartbeat failed: %d body=%s", hbRes2.Code, hbRes2.Body.String())
+	}
+	if err := json.Unmarshal(hbRes2.Body.Bytes(), &hbBody); err != nil {
+		t.Fatalf("decode second heartbeat body: %v", err)
+	}
+	releaseInfo, _ = hbBody["release"].(map[string]any)
+	if updateRequired, _ := releaseInfo["update_required"].(bool); updateRequired {
+		t.Fatalf("expected release update_required=false after applied ack, body=%s", hbRes2.Body.String())
 	}
 }
 

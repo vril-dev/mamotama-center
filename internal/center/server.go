@@ -81,12 +81,24 @@ type policyUpsertRequest struct {
 	Note           string   `json:"note,omitempty"`
 }
 
+type releaseUpsertRequest struct {
+	Version   string `json:"version"`
+	Platform  string `json:"platform"`
+	SHA256    string `json:"sha256,omitempty"`
+	BinaryB64 string `json:"binary_b64,omitempty"`
+	Note      string `json:"note,omitempty"`
+}
+
 type bundleInspectRequest struct {
 	BundleTGZB64 string `json:"bundle_tgz_b64"`
 	BundleSHA256 string `json:"bundle_sha256,omitempty"`
 }
 
 type policyAssignRequest struct {
+	Version string `json:"version"`
+}
+
+type releaseAssignRequest struct {
 	Version string `json:"version"`
 }
 
@@ -112,6 +124,30 @@ type policyAckRequest struct {
 	Message       string `json:"message,omitempty"`
 	BodyHash      string `json:"body_hash"`
 	SignatureB64  string `json:"signature_b64"`
+}
+
+type releasePullRequest struct {
+	DeviceID              string `json:"device_id"`
+	KeyID                 string `json:"key_id"`
+	Timestamp             string `json:"timestamp"`
+	Nonce                 string `json:"nonce"`
+	CurrentReleaseVersion string `json:"current_release_version,omitempty"`
+	CurrentReleaseSHA256  string `json:"current_release_sha256,omitempty"`
+	BodyHash              string `json:"body_hash"`
+	SignatureB64          string `json:"signature_b64"`
+}
+
+type releaseAckRequest struct {
+	DeviceID       string `json:"device_id"`
+	KeyID          string `json:"key_id"`
+	Timestamp      string `json:"timestamp"`
+	Nonce          string `json:"nonce"`
+	ReleaseVersion string `json:"release_version"`
+	ReleaseSHA256  string `json:"release_sha256,omitempty"`
+	ResultStatus   string `json:"result_status"`
+	Message        string `json:"message,omitempty"`
+	BodyHash       string `json:"body_hash"`
+	SignatureB64   string `json:"signature_b64"`
 }
 
 type logsPushRequest struct {
@@ -168,16 +204,20 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	edgeroutes.Register(s.mux, edgeroutes.Handlers{
-		Enroll:     s.handleEnroll,
-		Heartbeat:  s.handleHeartbeat,
-		PolicyPull: s.handlePolicyPull,
-		PolicyAck:  s.handlePolicyAck,
-		LogsPush:   s.handleLogsPush,
+		Enroll:      s.handleEnroll,
+		Heartbeat:   s.handleHeartbeat,
+		PolicyPull:  s.handlePolicyPull,
+		PolicyAck:   s.handlePolicyAck,
+		ReleasePull: s.handleReleasePull,
+		ReleaseAck:  s.handleReleaseAck,
+		LogsPush:    s.handleLogsPush,
 	})
 	adminroutes.Register(s.mux, adminroutes.Handlers{
 		Policies:    s.handlePolicies,
 		PolicyTools: s.handlePolicyTools,
 		PolicyByID:  s.handlePolicyByVersion,
+		Releases:    s.handleReleases,
+		ReleaseByID: s.handleReleaseByVersion,
 		Devices:     s.handleDevices,
 		DeviceByID:  s.handleDevice,
 		LogDevices:  s.handleAdminLogDevices,
@@ -471,6 +511,7 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	updateRequired := saved.DesiredPolicyVersion != "" && (saved.CurrentPolicyVersion != saved.DesiredPolicyVersion || !secureTextEqual(saved.CurrentPolicySHA256, saved.DesiredPolicySHA256))
+	releaseUpdateRequired := saved.DesiredReleaseVersion != "" && (saved.CurrentReleaseVersion != saved.DesiredReleaseVersion || !secureTextEqual(saved.CurrentReleaseSHA256, saved.DesiredReleaseSHA256))
 	policy := map[string]any{
 		"desired_version":  saved.DesiredPolicyVersion,
 		"desired_sha256":   saved.DesiredPolicySHA256,
@@ -484,12 +525,26 @@ func (s *Server) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	if updateRequired {
 		policy["fetch_path"] = "/v1/policy/pull"
 	}
+	release := map[string]any{
+		"desired_version":  saved.DesiredReleaseVersion,
+		"desired_sha256":   saved.DesiredReleaseSHA256,
+		"desired_assigned": saved.DesiredReleaseAssignedAt,
+		"current_version":  saved.CurrentReleaseVersion,
+		"current_sha256":   saved.CurrentReleaseSHA256,
+		"last_sync_at":     saved.LastReleaseSyncAt,
+		"update_required":  releaseUpdateRequired,
+		"fetch_path":       "",
+	}
+	if releaseUpdateRequired {
+		release["fetch_path"] = "/v1/release/pull"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":            "ok",
 		"device_id":         saved.DeviceID,
 		"last_heartbeat_at": saved.LastHeartbeatAt,
 		"device_status":     s.buildDeviceStatus(saved, now),
 		"policy":            policy,
+		"release":           release,
 	})
 }
 
@@ -700,6 +755,203 @@ func (s *Server) handlePolicyByVersion(w http.ResponseWriter, r *http.Request) {
 			default:
 				s.logger.Printf(`{"level":"error","msg":"policy delete failed","version":"%s","error":"%s"}`, version, err)
 				writeError(w, http.StatusInternalServerError, "failed to delete policy")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"version": version,
+			"deleted": true,
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleReleases(w http.ResponseWriter, r *http.Request) {
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireAdminRead(w, r) {
+			return
+		}
+		releases := s.store.listReleases()
+		devices := s.store.list()
+		assigned := make(map[string]int, len(releases))
+		applied := make(map[string]int, len(releases))
+		for _, rec := range devices {
+			if rec.DesiredReleaseVersion != "" {
+				assigned[rec.DesiredReleaseVersion]++
+			}
+			if rec.CurrentReleaseVersion != "" {
+				applied[rec.CurrentReleaseVersion]++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"releases": releases,
+			"summary": map[string]any{
+				"count":               len(releases),
+				"assigned_by_version": assigned,
+				"applied_by_version":  applied,
+			},
+		})
+	case http.MethodPost:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		var req releaseUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		now := s.nowFn().UTC()
+		rel, err := s.store.upsertRelease(ReleaseRecord{
+			Version:   req.Version,
+			Platform:  req.Platform,
+			SHA256:    req.SHA256,
+			BinaryB64: req.BinaryB64,
+			Note:      req.Note,
+		}, now)
+		if err != nil {
+			switch {
+			case errors.Is(err, errStoreConflict):
+				writeError(w, http.StatusConflict, "release version already exists with different content")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusUnprocessableEntity, "invalid release payload")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"persist release failed","version":"%s","error":"%s"}`, strings.TrimSpace(req.Version), err)
+				writeError(w, http.StatusInternalServerError, "failed to persist release")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"release": rel,
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *Server) handleReleaseByVersion(w http.ResponseWriter, r *http.Request) {
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	version, action, ok := parseReleaseVersionPath(r.URL.Path)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "release version is required in path")
+		return
+	}
+	if action == "approve" {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		rel, err := s.store.approveRelease(version, s.nowFn().UTC())
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				writeError(w, http.StatusNotFound, "release not found")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusBadRequest, "release version is invalid")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"release approve failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to approve release")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"release": rel,
+		})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		if !s.requireAdminRead(w, r) {
+			return
+		}
+		rel, found := s.store.getRelease(version)
+		if !found {
+			writeError(w, http.StatusNotFound, "release not found")
+			return
+		}
+		devices := s.store.list()
+		var desired, current int
+		for _, rec := range devices {
+			if rec.DesiredReleaseVersion == rel.Version {
+				desired++
+			}
+			if rec.CurrentReleaseVersion == rel.Version {
+				current++
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"release": rel,
+			"usage": map[string]any{
+				"desired_device_count": desired,
+				"current_device_count": current,
+			},
+		})
+	case http.MethodPut:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		var req releaseUpsertRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid json payload")
+			return
+		}
+		req.Version = strings.TrimSpace(req.Version)
+		if req.Version != "" && normalizePolicyVersion(req.Version) != version {
+			writeError(w, http.StatusBadRequest, "version in body must match version in path")
+			return
+		}
+		rel, err := s.store.putRelease(ReleaseRecord{
+			Version:   version,
+			Platform:  req.Platform,
+			SHA256:    req.SHA256,
+			BinaryB64: req.BinaryB64,
+			Note:      req.Note,
+		}, s.nowFn().UTC())
+		if err != nil {
+			switch {
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusUnprocessableEntity, "invalid release payload")
+			case errors.Is(err, errStoreInUse):
+				writeError(w, http.StatusConflict, "release is in use and cannot be overwritten")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"release put failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to put release")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":  "ok",
+			"release": rel,
+		})
+	case http.MethodDelete:
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		err := s.store.deleteRelease(version)
+		if err != nil {
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+				writeError(w, http.StatusNotFound, "release not found")
+			case errors.Is(err, errStoreInvalid):
+				writeError(w, http.StatusBadRequest, "release version is invalid")
+			case errors.Is(err, errStoreInUse):
+				writeError(w, http.StatusConflict, "release is in use and cannot be deleted")
+			default:
+				s.logger.Printf(`{"level":"error","msg":"release delete failed","version":"%s","error":"%s"}`, version, err)
+				writeError(w, http.StatusInternalServerError, "failed to delete release")
 			}
 			return
 		}
@@ -927,6 +1179,173 @@ func (s *Server) handlePolicyAck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleReleasePull(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	var req releasePullRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.CurrentReleaseVersion = normalizePolicyVersion(req.CurrentReleaseVersion)
+	req.CurrentReleaseSHA256 = strings.ToLower(strings.TrimSpace(req.CurrentReleaseSHA256))
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, body_hash, and signature_b64 are required")
+		return
+	}
+
+	rec, _, now, ok := s.authenticateSignedDeviceRequest(
+		w,
+		"release_pull",
+		req.DeviceID,
+		req.KeyID,
+		req.Timestamp,
+		req.Nonce,
+		req.BodyHash,
+		req.SignatureB64,
+		releasePullBodyCanonical(req),
+	)
+	if !ok {
+		return
+	}
+	updateRequired := rec.DesiredReleaseVersion != "" && (rec.CurrentReleaseVersion != rec.DesiredReleaseVersion || !secureTextEqual(rec.CurrentReleaseSHA256, rec.DesiredReleaseSHA256))
+	if !updateRequired {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":          "ok",
+			"device_id":       rec.DeviceID,
+			"update_required": false,
+			"release": map[string]any{
+				"desired_version": rec.DesiredReleaseVersion,
+				"desired_sha256":  rec.DesiredReleaseSHA256,
+				"current_version": rec.CurrentReleaseVersion,
+				"current_sha256":  rec.CurrentReleaseSHA256,
+			},
+			"device_status": s.buildDeviceStatus(rec, now),
+		})
+		return
+	}
+	rel, found := s.store.getRelease(rec.DesiredReleaseVersion)
+	if !found {
+		writeError(w, http.StatusConflict, "assigned release is missing")
+		return
+	}
+	if rel.Status != releaseStatusApproved {
+		writeError(w, http.StatusConflict, "assigned release is not approved")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":          "ok",
+		"device_id":       rec.DeviceID,
+		"update_required": true,
+		"release": map[string]any{
+			"version":      rel.Version,
+			"platform":     rel.Platform,
+			"sha256":       rel.SHA256,
+			"binary_b64":   rel.BinaryB64,
+			"note":         rel.Note,
+			"created_at":   rel.CreatedAt,
+			"updated_at":   rel.UpdatedAt,
+			"assigned_at":  rec.DesiredReleaseAssignedAt,
+			"current_seen": rec.CurrentReleaseVersion,
+		},
+		"device_status": s.buildDeviceStatus(rec, now),
+	})
+}
+
+func (s *Server) handleReleaseAck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !s.ensureSecureTransport(w, r) {
+		return
+	}
+	var req releaseAckRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.KeyID = strings.TrimSpace(req.KeyID)
+	req.Timestamp = strings.TrimSpace(req.Timestamp)
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.ReleaseVersion = normalizePolicyVersion(req.ReleaseVersion)
+	req.ReleaseSHA256 = strings.ToLower(strings.TrimSpace(req.ReleaseSHA256))
+	req.ResultStatus = strings.ToLower(strings.TrimSpace(req.ResultStatus))
+	req.Message = strings.TrimSpace(req.Message)
+	req.BodyHash = strings.ToLower(strings.TrimSpace(req.BodyHash))
+	req.SignatureB64 = strings.TrimSpace(req.SignatureB64)
+	if req.DeviceID == "" || req.KeyID == "" || req.Timestamp == "" || req.Nonce == "" || req.BodyHash == "" || req.SignatureB64 == "" || req.ResultStatus == "" {
+		writeError(w, http.StatusBadRequest, "device_id, key_id, timestamp, nonce, result_status, body_hash, and signature_b64 are required")
+		return
+	}
+	switch req.ResultStatus {
+	case "applied", "failed":
+	default:
+		writeError(w, http.StatusBadRequest, "result_status must be one of: applied, failed")
+		return
+	}
+	if req.ResultStatus == "applied" {
+		if req.ReleaseVersion == "" || req.ReleaseSHA256 == "" {
+			writeError(w, http.StatusBadRequest, "release_version and release_sha256 are required when result_status=applied")
+			return
+		}
+	}
+
+	rec, _, now, ok := s.authenticateSignedDeviceRequest(
+		w,
+		"release_ack",
+		req.DeviceID,
+		req.KeyID,
+		req.Timestamp,
+		req.Nonce,
+		req.BodyHash,
+		req.SignatureB64,
+		releaseAckBodyCanonical(req),
+	)
+	if !ok {
+		return
+	}
+	if req.ResultStatus == "applied" && rec.DesiredReleaseVersion != "" && req.ReleaseVersion != rec.DesiredReleaseVersion {
+		writeError(w, http.StatusConflict, "ack release_version does not match desired release")
+		return
+	}
+	saved, err := s.store.updateReleaseAck(req.DeviceID, req.ReleaseVersion, req.ReleaseSHA256, req.ResultStatus, req.Message, now)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusNotFound, "device is not enrolled")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist release ack failed","device_id":"%s","error":"%s"}`, req.DeviceID, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist release ack")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"device_id": saved.DeviceID,
+		"release": map[string]any{
+			"desired_version": saved.DesiredReleaseVersion,
+			"desired_sha256":  saved.DesiredReleaseSHA256,
+			"current_version": saved.CurrentReleaseVersion,
+			"current_sha256":  saved.CurrentReleaseSHA256,
+			"last_ack_at":     saved.LastReleaseAckAt,
+			"last_ack_status": saved.LastReleaseAckStatus,
+		},
+		"device_status": s.buildDeviceStatus(saved, now),
+	})
+}
+
 func (s *Server) handleLogsPush(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1107,6 +1526,13 @@ func (s *Server) handleDevice(w http.ResponseWriter, r *http.Request) {
 		s.handleAssignDesiredPolicy(w, r, deviceID)
 		return
 	}
+	if action == "assign-release" {
+		if !s.requireAdminWrite(w, r) {
+			return
+		}
+		s.handleAssignDesiredRelease(w, r, deviceID)
+		return
+	}
 	if action == "download-policy" {
 		if !s.requireAdminRead(w, r) {
 			return
@@ -1265,6 +1691,58 @@ func (s *Server) handleAssignDesiredPolicy(w http.ResponseWriter, r *http.Reques
 			"version":     pol.Version,
 			"sha256":      pol.SHA256,
 			"assigned_at": saved.DesiredPolicyAssignedAt,
+		},
+		"device_status": s.buildDeviceStatus(saved, now),
+	})
+}
+
+func (s *Server) handleAssignDesiredRelease(w http.ResponseWriter, r *http.Request, deviceID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req releaseAssignRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json payload")
+		return
+	}
+	req.Version = normalizePolicyVersion(req.Version)
+	if req.Version == "" {
+		writeError(w, http.StatusBadRequest, "version is required")
+		return
+	}
+
+	now := s.nowFn().UTC()
+	saved, rel, err := s.store.assignDesiredRelease(deviceID, req.Version, now)
+	if err != nil {
+		if errors.Is(err, errStoreInvalid) {
+			writeError(w, http.StatusBadRequest, "version is invalid")
+			return
+		}
+		if errors.Is(err, errStoreConflict) {
+			writeError(w, http.StatusConflict, "release must be approved before assignment")
+			return
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			if _, exists := s.store.get(deviceID); !exists {
+				writeError(w, http.StatusNotFound, "device not found")
+				return
+			}
+			writeError(w, http.StatusNotFound, "release not found")
+			return
+		}
+		s.logger.Printf(`{"level":"error","msg":"persist release assignment failed","device_id":"%s","version":"%s","error":"%s"}`, deviceID, req.Version, err)
+		writeError(w, http.StatusInternalServerError, "failed to persist release assignment")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":    "ok",
+		"device_id": saved.DeviceID,
+		"release": map[string]any{
+			"version":     rel.Version,
+			"platform":    rel.Platform,
+			"sha256":      rel.SHA256,
+			"assigned_at": saved.DesiredReleaseAssignedAt,
 		},
 		"device_status": s.buildDeviceStatus(saved, now),
 	})
@@ -1560,6 +2038,13 @@ func parseDevicePath(path string) (deviceID string, action string, ok bool) {
 		}
 		return deviceID, "assign-policy", true
 	}
+	if strings.HasSuffix(deviceID, ":assign-release") {
+		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":assign-release"))
+		if deviceID == "" {
+			return "", "", false
+		}
+		return deviceID, "assign-release", true
+	}
 	if strings.HasSuffix(deviceID, ":download-policy") {
 		deviceID = strings.TrimSpace(strings.TrimSuffix(deviceID, ":download-policy"))
 		if deviceID == "" {
@@ -1594,12 +2079,39 @@ func policyAckBodyCanonical(req policyAckRequest) string {
 	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.PolicyVersion + "\n" + req.PolicySHA256 + "\n" + req.ResultStatus + "\n" + req.Message
 }
 
+func releasePullBodyCanonical(req releasePullRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.CurrentReleaseVersion + "\n" + req.CurrentReleaseSHA256
+}
+
+func releaseAckBodyCanonical(req releaseAckRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.ReleaseVersion + "\n" + req.ReleaseSHA256 + "\n" + req.ResultStatus + "\n" + req.Message
+}
+
 func logsPushBodyCanonical(req logsPushRequest) string {
 	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + strconv.Itoa(req.EntryCount) + "\n" + req.ContentSHA256 + "\n" + req.ContentEncoding
 }
 
 func parsePolicyVersionPath(path string) (version string, action string, ok bool) {
 	version = strings.TrimSpace(strings.TrimPrefix(path, "/v1/policies/"))
+	if version == "" || strings.Contains(version, "/") {
+		return "", "", false
+	}
+	if strings.HasSuffix(version, ":approve") {
+		version = normalizePolicyVersion(strings.TrimSuffix(version, ":approve"))
+		if version == "" {
+			return "", "", false
+		}
+		return version, "approve", true
+	}
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return "", "", false
+	}
+	return version, "", true
+}
+
+func parseReleaseVersionPath(path string) (version string, action string, ok bool) {
+	version = strings.TrimSpace(strings.TrimPrefix(path, "/v1/releases/"))
 	if version == "" || strings.Contains(version, "/") {
 		return "", "", false
 	}

@@ -27,8 +27,10 @@ var (
 )
 
 const (
-	policyStatusDraft    = "draft"
-	policyStatusApproved = "approved"
+	policyStatusDraft     = "draft"
+	policyStatusApproved  = "approved"
+	releaseStatusDraft    = "draft"
+	releaseStatusApproved = "approved"
 )
 
 type RevokedKeyRecord struct {
@@ -50,6 +52,18 @@ type PolicyRecord struct {
 	UpdatedAt    string `json:"updated_at,omitempty"`
 	ApprovedAt   string `json:"approved_at,omitempty"`
 	Note         string `json:"note,omitempty"`
+}
+
+type ReleaseRecord struct {
+	Version    string `json:"version"`
+	Platform   string `json:"platform"`
+	SHA256     string `json:"sha256"`
+	BinaryB64  string `json:"binary_b64,omitempty"`
+	Status     string `json:"status"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at,omitempty"`
+	ApprovedAt string `json:"approved_at,omitempty"`
+	Note       string `json:"note,omitempty"`
 }
 
 type DeviceRecord struct {
@@ -78,6 +92,15 @@ type DeviceRecord struct {
 	LastPolicyAckAt            string             `json:"last_policy_ack_at,omitempty"`
 	LastPolicyAckStatus        string             `json:"last_policy_ack_status,omitempty"`
 	LastPolicyAckMessage       string             `json:"last_policy_ack_message,omitempty"`
+	DesiredReleaseVersion      string             `json:"desired_release_version,omitempty"`
+	DesiredReleaseSHA256       string             `json:"desired_release_sha256,omitempty"`
+	DesiredReleaseAssignedAt   string             `json:"desired_release_assigned_at,omitempty"`
+	CurrentReleaseVersion      string             `json:"current_release_version,omitempty"`
+	CurrentReleaseSHA256       string             `json:"current_release_sha256,omitempty"`
+	LastReleaseSyncAt          string             `json:"last_release_sync_at,omitempty"`
+	LastReleaseAckAt           string             `json:"last_release_ack_at,omitempty"`
+	LastReleaseAckStatus       string             `json:"last_release_ack_status,omitempty"`
+	LastReleaseAckMessage      string             `json:"last_release_ack_message,omitempty"`
 	LastLogUploadAt            string             `json:"last_log_upload_at,omitempty"`
 	LastLogUploadEntries       int                `json:"last_log_upload_entries,omitempty"`
 	LastLogUploadBytes         int64              `json:"last_log_upload_bytes,omitempty"`
@@ -143,8 +166,9 @@ type logBatchFile struct {
 }
 
 type storedDevices struct {
-	Devices  []DeviceRecord `json:"devices"`
-	Policies []PolicyRecord `json:"policies,omitempty"`
+	Devices  []DeviceRecord  `json:"devices"`
+	Policies []PolicyRecord  `json:"policies,omitempty"`
+	Releases []ReleaseRecord `json:"releases,omitempty"`
 }
 
 type deviceStore struct {
@@ -154,6 +178,7 @@ type deviceStore struct {
 	logMaxBytes  int64
 	devices      map[string]DeviceRecord
 	policies     map[string]PolicyRecord
+	releases     map[string]ReleaseRecord
 }
 
 func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
@@ -164,6 +189,7 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		logMaxBytes:  cfg.LogMaxBytes,
 		devices:      map[string]DeviceRecord{},
 		policies:     map[string]PolicyRecord{},
+		releases:     map[string]ReleaseRecord{},
 	}
 
 	b, err := os.ReadFile(path)
@@ -194,6 +220,11 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		rec.CurrentPolicyVersion = normalizePolicyVersion(rec.CurrentPolicyVersion)
 		rec.CurrentPolicySHA256 = strings.ToLower(strings.TrimSpace(rec.CurrentPolicySHA256))
 		rec.LastPolicyAckStatus = strings.TrimSpace(strings.ToLower(rec.LastPolicyAckStatus))
+		rec.DesiredReleaseVersion = normalizePolicyVersion(rec.DesiredReleaseVersion)
+		rec.DesiredReleaseSHA256 = strings.ToLower(strings.TrimSpace(rec.DesiredReleaseSHA256))
+		rec.CurrentReleaseVersion = normalizePolicyVersion(rec.CurrentReleaseVersion)
+		rec.CurrentReleaseSHA256 = strings.ToLower(strings.TrimSpace(rec.CurrentReleaseSHA256))
+		rec.LastReleaseAckStatus = strings.TrimSpace(strings.ToLower(rec.LastReleaseAckStatus))
 		rec.LastLogUploadSHA256 = strings.ToLower(strings.TrimSpace(rec.LastLogUploadSHA256))
 		if rec.KeyID == "" && rec.PublicKeyFingerprintSHA256 != "" {
 			rec.KeyID = defaultKeyIDFromFingerprint(rec.PublicKeyFingerprintSHA256)
@@ -246,6 +277,30 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		}
 		s.policies[rec.Version] = rec
 	}
+	for _, rec := range payload.Releases {
+		if rec.Version == "" {
+			continue
+		}
+		rec.Version = normalizePolicyVersion(rec.Version)
+		rec.Platform = normalizeReleasePlatform(rec.Platform)
+		rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+		rec.BinaryB64, rec.SHA256 = normalizeAndValidateReleaseBinary(rec.BinaryB64, rec.SHA256)
+		if rec.Version == "" || rec.Platform == "" || rec.SHA256 == "" || rec.BinaryB64 == "" {
+			continue
+		}
+		rec.Status = strings.ToLower(strings.TrimSpace(rec.Status))
+		switch rec.Status {
+		case "":
+			rec.Status = releaseStatusApproved
+			if rec.ApprovedAt == "" {
+				rec.ApprovedAt = rec.CreatedAt
+			}
+		case releaseStatusDraft, releaseStatusApproved:
+		default:
+			continue
+		}
+		s.releases[rec.Version] = rec
+	}
 	return s, nil
 }
 
@@ -290,6 +345,30 @@ func (s *deviceStore) getPolicy(version string) (PolicyRecord, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	rec, ok := s.policies[version]
+	return rec, ok
+}
+
+func (s *deviceStore) listReleases() []ReleaseRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	releases := make([]ReleaseRecord, 0, len(s.releases))
+	for _, rec := range s.releases {
+		releases = append(releases, rec)
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		return releases[i].Version < releases[j].Version
+	})
+	return releases
+}
+
+func (s *deviceStore) getRelease(version string) (ReleaseRecord, bool) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return ReleaseRecord{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rec, ok := s.releases[version]
 	return rec, ok
 }
 
@@ -465,9 +544,154 @@ func (s *deviceStore) deletePolicy(version string) error {
 	return nil
 }
 
+func (s *deviceStore) upsertRelease(rec ReleaseRecord, now time.Time) (ReleaseRecord, error) {
+	rec.Version = normalizePolicyVersion(rec.Version)
+	rec.Platform = normalizeReleasePlatform(rec.Platform)
+	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+	rec.BinaryB64, rec.SHA256 = normalizeAndValidateReleaseBinary(rec.BinaryB64, rec.SHA256)
+	rec.Note = strings.TrimSpace(rec.Note)
+	if rec.Version == "" || rec.Platform == "" || rec.SHA256 == "" || rec.BinaryB64 == "" {
+		return ReleaseRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.releases[rec.Version]
+	if ok {
+		if existing.SHA256 == rec.SHA256 && existing.BinaryB64 == rec.BinaryB64 && existing.Platform == rec.Platform {
+			if rec.Note != "" && existing.Note == "" {
+				existing.Note = rec.Note
+				existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+				s.releases[rec.Version] = existing
+				if err := s.saveLocked(); err != nil {
+					return ReleaseRecord{}, err
+				}
+			}
+			return existing, nil
+		}
+		return ReleaseRecord{}, errStoreConflict
+	}
+	rec.Status = releaseStatusDraft
+	rec.CreatedAt = now.UTC().Format(time.RFC3339Nano)
+	rec.UpdatedAt = rec.CreatedAt
+	s.releases[rec.Version] = rec
+	if err := s.saveLocked(); err != nil {
+		return ReleaseRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) approveRelease(version string, approvedAt time.Time) (ReleaseRecord, error) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return ReleaseRecord{}, errStoreInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rec, ok := s.releases[version]
+	if !ok {
+		return ReleaseRecord{}, os.ErrNotExist
+	}
+	if rec.Status == releaseStatusApproved {
+		return rec, nil
+	}
+	rec.Status = releaseStatusApproved
+	rec.ApprovedAt = approvedAt.UTC().Format(time.RFC3339Nano)
+	rec.UpdatedAt = rec.ApprovedAt
+	s.releases[version] = rec
+	if err := s.saveLocked(); err != nil {
+		return ReleaseRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) putRelease(rec ReleaseRecord, now time.Time) (ReleaseRecord, error) {
+	rec.Version = normalizePolicyVersion(rec.Version)
+	rec.Platform = normalizeReleasePlatform(rec.Platform)
+	rec.SHA256 = strings.ToLower(strings.TrimSpace(rec.SHA256))
+	rec.BinaryB64, rec.SHA256 = normalizeAndValidateReleaseBinary(rec.BinaryB64, rec.SHA256)
+	rec.Note = strings.TrimSpace(rec.Note)
+	if rec.Version == "" || rec.Platform == "" || rec.SHA256 == "" || rec.BinaryB64 == "" {
+		return ReleaseRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.releases[rec.Version]
+	if !ok {
+		rec.Status = releaseStatusDraft
+		rec.CreatedAt = now.UTC().Format(time.RFC3339Nano)
+		rec.UpdatedAt = rec.CreatedAt
+		s.releases[rec.Version] = rec
+		if err := s.saveLocked(); err != nil {
+			return ReleaseRecord{}, err
+		}
+		return rec, nil
+	}
+
+	if existing.SHA256 == rec.SHA256 && existing.BinaryB64 == rec.BinaryB64 && existing.Platform == rec.Platform {
+		if rec.Note != "" && existing.Note == "" {
+			existing.Note = rec.Note
+			existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+			s.releases[rec.Version] = existing
+			if err := s.saveLocked(); err != nil {
+				return ReleaseRecord{}, err
+			}
+		}
+		return existing, nil
+	}
+	if s.releaseInUseLocked(rec.Version) {
+		return ReleaseRecord{}, errStoreInUse
+	}
+
+	existing.Platform = rec.Platform
+	existing.SHA256 = rec.SHA256
+	existing.BinaryB64 = rec.BinaryB64
+	if rec.Note != "" {
+		existing.Note = rec.Note
+	}
+	existing.Status = releaseStatusDraft
+	existing.ApprovedAt = ""
+	existing.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+	s.releases[rec.Version] = existing
+	if err := s.saveLocked(); err != nil {
+		return ReleaseRecord{}, err
+	}
+	return existing, nil
+}
+
+func (s *deviceStore) deleteRelease(version string) error {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return errStoreInvalid
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.releases[version]; !ok {
+		return os.ErrNotExist
+	}
+	if s.releaseInUseLocked(version) {
+		return errStoreInUse
+	}
+	delete(s.releases, version)
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *deviceStore) policyInUseLocked(version string) bool {
 	for _, rec := range s.devices {
 		if rec.DesiredPolicyVersion == version || rec.CurrentPolicyVersion == version {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *deviceStore) releaseInUseLocked(version string) bool {
+	for _, rec := range s.devices {
+		if rec.DesiredReleaseVersion == version || rec.CurrentReleaseVersion == version {
 			return true
 		}
 	}
@@ -494,6 +718,29 @@ func normalizeAndValidatePolicyBundle(rawB64, rawSHA string) (string, string, er
 		return "", "", errStoreInvalid
 	}
 	return b64v, shav, nil
+}
+
+const maxReleaseBinaryBytes = 128 << 20 // 128 MiB
+
+func normalizeReleasePlatform(v string) string {
+	return strings.ToLower(strings.TrimSpace(v))
+}
+
+func normalizeAndValidateReleaseBinary(rawB64, rawSHA string) (string, string) {
+	b64v := strings.TrimSpace(rawB64)
+	shav := strings.ToLower(strings.TrimSpace(rawSHA))
+	if b64v == "" {
+		return "", ""
+	}
+	payload, err := decodeBase64String(b64v)
+	if err != nil || len(payload) == 0 || len(payload) > maxReleaseBinaryBytes {
+		return "", ""
+	}
+	got := hashBytesHex(payload)
+	if shav != "" && shav != got {
+		return "", ""
+	}
+	return b64v, got
 }
 
 func validateTGZArchive(payload []byte) error {
@@ -579,6 +826,15 @@ func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 		rec.LastPolicyAckAt = prev.LastPolicyAckAt
 		rec.LastPolicyAckStatus = prev.LastPolicyAckStatus
 		rec.LastPolicyAckMessage = prev.LastPolicyAckMessage
+		rec.DesiredReleaseVersion = prev.DesiredReleaseVersion
+		rec.DesiredReleaseSHA256 = prev.DesiredReleaseSHA256
+		rec.DesiredReleaseAssignedAt = prev.DesiredReleaseAssignedAt
+		rec.CurrentReleaseVersion = prev.CurrentReleaseVersion
+		rec.CurrentReleaseSHA256 = prev.CurrentReleaseSHA256
+		rec.LastReleaseSyncAt = prev.LastReleaseSyncAt
+		rec.LastReleaseAckAt = prev.LastReleaseAckAt
+		rec.LastReleaseAckStatus = prev.LastReleaseAckStatus
+		rec.LastReleaseAckMessage = prev.LastReleaseAckMessage
 		rec.LastLogUploadAt = prev.LastLogUploadAt
 		rec.LastLogUploadEntries = prev.LastLogUploadEntries
 		rec.LastLogUploadBytes = prev.LastLogUploadBytes
@@ -657,6 +913,36 @@ func (s *deviceStore) assignDesiredPolicy(deviceID, version string, assignedAt t
 	return rec, pol, nil
 }
 
+func (s *deviceStore) assignDesiredRelease(deviceID, version string, assignedAt time.Time) (DeviceRecord, ReleaseRecord, error) {
+	version = normalizePolicyVersion(version)
+	if version == "" {
+		return DeviceRecord{}, ReleaseRecord{}, errStoreInvalid
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, ReleaseRecord{}, os.ErrNotExist
+	}
+	rel, ok := s.releases[version]
+	if !ok {
+		return DeviceRecord{}, ReleaseRecord{}, os.ErrNotExist
+	}
+	if rel.Status != releaseStatusApproved {
+		return DeviceRecord{}, ReleaseRecord{}, errStoreConflict
+	}
+	rec.DesiredReleaseVersion = rel.Version
+	rec.DesiredReleaseSHA256 = rel.SHA256
+	rec.DesiredReleaseAssignedAt = assignedAt.UTC().Format(time.RFC3339Nano)
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, ReleaseRecord{}, err
+	}
+	return rec, rel, nil
+}
+
 func (s *deviceStore) updatePolicyAck(deviceID, version, hash, status, message string, ackAt time.Time) (DeviceRecord, error) {
 	version = normalizePolicyVersion(version)
 	hash = strings.ToLower(strings.TrimSpace(hash))
@@ -677,6 +963,34 @@ func (s *deviceStore) updatePolicyAck(deviceID, version, hash, status, message s
 		rec.CurrentPolicyVersion = version
 		rec.CurrentPolicySHA256 = hash
 		rec.LastPolicySyncAt = rec.LastPolicyAckAt
+	}
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
+	return rec, nil
+}
+
+func (s *deviceStore) updateReleaseAck(deviceID, version, hash, status, message string, ackAt time.Time) (DeviceRecord, error) {
+	version = normalizePolicyVersion(version)
+	hash = strings.ToLower(strings.TrimSpace(hash))
+	status = strings.ToLower(strings.TrimSpace(status))
+	message = strings.TrimSpace(message)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+	rec.LastReleaseAckAt = ackAt.UTC().Format(time.RFC3339Nano)
+	rec.LastReleaseAckStatus = status
+	rec.LastReleaseAckMessage = message
+	if status == "applied" && version != "" {
+		rec.CurrentReleaseVersion = version
+		rec.CurrentReleaseSHA256 = hash
+		rec.LastReleaseSyncAt = rec.LastReleaseAckAt
 	}
 	s.devices[deviceID] = rec
 	if err := s.saveLocked(); err != nil {
@@ -1366,7 +1680,14 @@ func (s *deviceStore) saveLocked() error {
 	sort.Slice(policies, func(i, j int) bool {
 		return policies[i].Version < policies[j].Version
 	})
-	payload := storedDevices{Devices: devices, Policies: policies}
+	releases := make([]ReleaseRecord, 0, len(s.releases))
+	for _, rec := range s.releases {
+		releases = append(releases, rec)
+	}
+	sort.Slice(releases, func(i, j int) bool {
+		return releases[i].Version < releases[j].Version
+	})
+	payload := storedDevices{Devices: devices, Policies: policies, Releases: releases}
 	out, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal store: %w", err)

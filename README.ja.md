@@ -15,27 +15,33 @@
 - edge からのログ収集
 - 管理 API / 管理 UI（`/admin/devices`, `/admin/logs`）
 
-## 現在の主な API (0.1.x)
+## 現在の主な API (0.2.x)
 
 - `POST /v1/enroll`
   - `X-License-Key` 必須
   - 署名付き登録
 - `POST /v1/heartbeat`
   - 署名付き heartbeat
-  - desired/current ポリシー状態と `update_required` を返却
+  - desired/current ポリシー状態に加えて desired/current リリース状態と `update_required` を返却
 - `POST /v1/policy/pull`
   - edge が割り当てポリシーを取得（`waf_raw` + 任意 bundle）
 - `POST /v1/policy/ack`
   - edge が適用結果（`applied|failed|rolled_back`）を通知
+- `POST /v1/release/pull`
+  - edge が割り当てリリースを取得（`platform`, `sha256`, `binary_b64`）
+- `POST /v1/release/ack`
+  - edge がリリース適用結果（`applied|failed`）を通知
 - `POST /v1/logs/push`
   - gzip ndjson ログをアップロード
 - `GET/POST/PUT/DELETE /v1/policies*`
   - 管理者向けポリシー操作（draft/approve/assign 運用）
+- `GET/POST/PUT/DELETE /v1/releases*`
+  - 管理者向けリリース操作（draft/approve/assign 運用）
 - `POST /v1/policies:inspect-bundle`
   - bundle 内 `.conf` 一覧と推奨 rule file を返却
 - `GET /v1/devices`, `GET /v1/devices/{id}`
   - 端末状態一覧/詳細
-- `POST /v1/devices/{id}:assign-policy|revoke|retire`
+- `POST /v1/devices/{id}:assign-policy|assign-release|revoke|retire`
   - 割り当て/失効/退役
 - `GET /v1/admin/logs/*`
   - ログ一覧/集計/ダウンロード

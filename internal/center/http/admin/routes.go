@@ -6,6 +6,8 @@ type Handlers struct {
 	Policies    http.HandlerFunc
 	PolicyTools http.HandlerFunc
 	PolicyByID  http.HandlerFunc
+	Releases    http.HandlerFunc
+	ReleaseByID http.HandlerFunc
 	Devices     http.HandlerFunc
 	DeviceByID  http.HandlerFunc
 	LogDevices  http.HandlerFunc
@@ -28,6 +30,12 @@ func Register(mux *http.ServeMux, h Handlers) {
 	}
 	if h.PolicyByID != nil {
 		mux.HandleFunc("/v1/policies/", h.PolicyByID)
+	}
+	if h.Releases != nil {
+		mux.HandleFunc("/v1/releases", h.Releases)
+	}
+	if h.ReleaseByID != nil {
+		mux.HandleFunc("/v1/releases/", h.ReleaseByID)
 	}
 	if h.Devices != nil {
 		mux.HandleFunc("/v1/devices", h.Devices)
