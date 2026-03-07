@@ -74,3 +74,23 @@ func TestValidateConfigFlagInvalidConfig(t *testing.T) {
 		t.Fatalf("unexpected output: %s", out)
 	}
 }
+
+func TestValidateConfigFlagInvalidStorageBackend(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "center.config-invalid-backend.json")
+	cfg := `{
+  "auth":{"enrollment_license_keys":["test-license-key-1234"]},
+  "storage":{"backend":"postgres","path":"./center-data/devices.json","sqlite_path":"./center-data/center.db"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write invalid backend config: %v", err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "-config", cfgPath, "-validate-config")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command failure for invalid backend, output=%s", out)
+	}
+	if !strings.Contains(string(out), "storage.backend must be one of: file, sqlite") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}

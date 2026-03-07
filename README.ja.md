@@ -95,6 +95,7 @@ cp center.config.example.json center.config.json
 - `auth.admin_read_api_keys` / `auth.admin_write_api_keys` を設定
 - 本番は `auth.require_tls=true` を維持
 - 永続化先 `storage.path` を設定
+- `storage.backend`（`file` または `sqlite`。既定 `file`）を設定
 - SQLite 管理用に `storage.sqlite_path` を設定
 
 3. ビルドと起動
