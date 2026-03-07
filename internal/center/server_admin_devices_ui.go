@@ -48,7 +48,7 @@ const adminDevicesPageHTML = `<!doctype html>
 </head>
 <body>
   <div class="wrap">
-    <h1>Center Admin Devices & Policies</h1>
+    <h1>Center Admin Devices, Policies & Releases</h1>
     <div class="panel">
       <div class="row">
         <div style="flex:1; min-width:280px;">
@@ -58,7 +58,7 @@ const adminDevicesPageHTML = `<!doctype html>
         <button id="saveKey">Save Key</button>
         <button id="refreshAll">Refresh All</button>
       </div>
-      <div class="muted">Read APIs: devices/policies/list/download. Write APIs: policy create/overwrite/approve/delete, device assign.</div>
+      <div class="muted">Read APIs: devices/policies/releases/list/download. Write APIs: policy/release create/overwrite/approve/delete, device assign.</div>
       <div id="err" class="error"></div>
       <div id="ok" class="ok"></div>
     </div>
@@ -73,7 +73,7 @@ const adminDevicesPageHTML = `<!doctype html>
         <table id="devicesTable">
           <thead>
             <tr>
-              <th>device_id</th><th>status</th><th>desired</th><th>current</th><th>flagged</th>
+              <th>device_id</th><th>status</th><th>policy(desired/current)</th><th>release(desired/current)</th><th>release apply_at</th><th>flagged</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -90,6 +90,22 @@ const adminDevicesPageHTML = `<!doctype html>
           <thead>
             <tr>
               <th>version</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>Releases</h2>
+        <div class="row">
+          <button id="reloadReleases">Reload Releases</button>
+          <span class="muted">Selected release: <span id="selectedRelease" class="mono">-</span></span>
+        </div>
+        <table id="releasesTable">
+          <thead>
+            <tr>
+              <th>version</th><th>platform</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -149,6 +165,49 @@ const adminDevicesPageHTML = `<!doctype html>
         <button id="downloadCurrent">Download Current Rule</button>
       </div>
       <div id="actionOut" class="mono"></div>
+    </div>
+
+    <div class="panel" style="margin-top:12px;">
+      <h2>Release Editor / Actions</h2>
+      <div class="row">
+        <div style="min-width:260px; flex:1;">
+          <label>Release Version</label>
+          <input id="releaseVersion" placeholder="edge-0.5.1">
+        </div>
+        <div style="min-width:220px; flex:1;">
+          <label>Platform</label>
+          <input id="releasePlatform" placeholder="linux-amd64">
+        </div>
+        <div style="min-width:320px; flex:1;">
+          <label>Note</label>
+          <input id="releaseNote" placeholder="optional note">
+        </div>
+      </div>
+      <div class="row">
+        <div style="min-width:340px; flex:1;">
+          <label>Release Binary (required for upload/overwrite)</label>
+          <input id="releaseBinaryFile" type="file">
+        </div>
+        <div style="min-width:340px; flex:1;">
+          <label>Binary SHA256 (auto)</label>
+          <input id="releaseSHA" readonly>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px;">
+        <button id="loadRelease">Load Release</button>
+        <button id="createRelease">Upload New (POST draft)</button>
+        <button id="overwriteRelease" class="warn">Overwrite (PUT draft)</button>
+        <button id="approveRelease">Approve</button>
+        <button id="deleteRelease" class="err">Delete Unused</button>
+      </div>
+      <div class="row">
+        <button id="assignRelease">Assign Release To Selected Device</button>
+        <div style="min-width:340px; flex:1;">
+          <label>Apply At (optional RFC3339)</label>
+          <input id="releaseApplyAt" placeholder="2026-03-08T02:00:00Z">
+        </div>
+      </div>
+      <div id="releaseActionOut" class="mono"></div>
     </div>
 
     <div class="panel" style="margin-top:12px;">
@@ -273,12 +332,18 @@ const adminDevicesPageHTML = `<!doctype html>
     const rfBaseDefault = "/var/lib/mamotama-edge/policy-active";
     let selectedDevice = "";
     let selectedPolicy = "";
+    let selectedRelease = "";
     let devicesCache = [];
     let policiesCache = [];
+    let releasesCache = [];
     let assignedBy = {};
     let appliedBy = {};
+    let releaseAssignedBy = {};
+    let releaseAppliedBy = {};
     let bundleB64 = "";
     let bundleSHA = "";
+    let releaseBinaryB64 = "";
+    let releaseSHA = "";
     let activeBaseByDevice = {};
     let activeBaseProfiles = {};
     let currentBaseProfile = rfDefaultProfile;
@@ -635,7 +700,9 @@ const adminDevicesPageHTML = `<!doctype html>
       for (const d of devicesCache) {
         const tr = document.createElement("tr");
         if (d.device_id === selectedDevice) tr.className = "selected";
-        tr.innerHTML = "<td>"+(d.device_id||"")+"</td><td>"+(d.status||"")+"</td><td>"+(d.desired_policy_version||"")+"</td><td>"+(d.current_policy_version||"")+"</td><td>"+String(!!d.flagged)+"</td>";
+        const policyPair = (d.desired_policy_version || "-") + " / " + (d.current_policy_version || "-");
+        const releasePair = (d.desired_release_version || "-") + " / " + (d.current_release_version || "-");
+        tr.innerHTML = "<td>"+(d.device_id||"")+"</td><td>"+(d.status||"")+"</td><td>"+policyPair+"</td><td>"+releasePair+"</td><td>"+(d.desired_release_not_before_at||"-")+"</td><td>"+String(!!d.flagged)+"</td>";
         tr.onclick = () => {
           selectedDevice = d.device_id || "";
           byId("selectedDevice").textContent = selectedDevice || "-";
@@ -662,6 +729,26 @@ const adminDevicesPageHTML = `<!doctype html>
           byId("version").value = selectedPolicy;
           renderPolicies();
           renderRuleFilesDiff();
+        };
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderReleases() {
+      const tbody = byId("releasesTable").querySelector("tbody");
+      tbody.innerHTML = "";
+      for (const rel of releasesCache) {
+        const tr = document.createElement("tr");
+        if (rel.version === selectedRelease) tr.className = "selected";
+        const assigned = releaseAssignedBy[rel.version] || 0;
+        const applied = releaseAppliedBy[rel.version] || 0;
+        tr.innerHTML = "<td>"+(rel.version||"")+"</td><td>"+(rel.platform||"")+"</td><td>"+(rel.status||"")+"</td><td>"+assigned+"</td><td>"+applied+"</td><td>"+(rel.updated_at||"")+"</td>";
+        tr.onclick = () => {
+          selectedRelease = rel.version || "";
+          byId("selectedRelease").textContent = selectedRelease || "-";
+          byId("releaseVersion").value = selectedRelease;
+          if (rel.platform) byId("releasePlatform").value = rel.platform;
+          renderReleases();
         };
         tbody.appendChild(tr);
       }
@@ -695,14 +782,34 @@ const adminDevicesPageHTML = `<!doctype html>
       setActionOut(body);
     }
 
+    async function loadReleases() {
+      const body = await api("GET", "/v1/releases");
+      releasesCache = body.releases || [];
+      releaseAssignedBy = (body.summary && body.summary.assigned_by_version) || {};
+      releaseAppliedBy = (body.summary && body.summary.applied_by_version) || {};
+      if (!selectedRelease && releasesCache.length > 0) {
+        selectedRelease = releasesCache[0].version || "";
+        byId("selectedRelease").textContent = selectedRelease || "-";
+        byId("releaseVersion").value = selectedRelease;
+      }
+      renderReleases();
+      setActionOut(body);
+    }
+
     async function refreshAll() {
       setErr(""); setOk("");
-      await Promise.all([loadDevices(), loadPolicies()]);
+      await Promise.all([loadDevices(), loadPolicies(), loadReleases()]);
     }
 
     function currentVersion() {
       const v = byId("version").value.trim();
       if (!v) throw new Error("policy version is required");
+      return v;
+    }
+
+    function currentReleaseVersion() {
+      const v = byId("releaseVersion").value.trim();
+      if (!v) throw new Error("release version is required");
       return v;
     }
 
@@ -723,6 +830,19 @@ const adminDevicesPageHTML = `<!doctype html>
         body.bundle_sha256 = bundleSHA;
       }
       return body;
+    }
+
+    function currentReleaseDraftBody(version) {
+      const platform = byId("releasePlatform").value.trim();
+      if (!platform) throw new Error("release platform is required");
+      if (!releaseBinaryB64 || !releaseSHA) throw new Error("release binary file is required");
+      return {
+        version,
+        platform,
+        sha256: releaseSHA,
+        binary_b64: releaseBinaryB64,
+        note: byId("releaseNote").value.trim(),
+      };
     }
 
     function renderBundleRuleFiles(files, recommended) {
@@ -886,6 +1006,7 @@ const adminDevicesPageHTML = `<!doctype html>
     byId("refreshAll").onclick = () => refreshAll().catch(e => setErr(String(e.message || e)));
     byId("reloadDevices").onclick = () => loadDevices().catch(e => setErr(String(e.message || e)));
     byId("reloadPolicies").onclick = () => loadPolicies().catch(e => setErr(String(e.message || e)));
+    byId("reloadReleases").onclick = () => loadReleases().catch(e => setErr(String(e.message || e)));
     byId("rfProfileSelect").onchange = (ev) => {
       try {
         setErr(""); setOk("");
@@ -1039,6 +1160,93 @@ const adminDevicesPageHTML = `<!doctype html>
       } catch (e) { setErr(String(e.message || e)); }
     };
 
+    byId("loadRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const body = await api("GET", "/v1/releases/" + encodeURIComponent(version));
+        const rel = body.release || {};
+        selectedRelease = rel.version || version;
+        byId("selectedRelease").textContent = selectedRelease || "-";
+        byId("releaseVersion").value = selectedRelease;
+        byId("releasePlatform").value = rel.platform || "";
+        byId("releaseNote").value = rel.note || "";
+        byId("releaseSHA").value = rel.sha256 || "";
+        releaseSHA = rel.sha256 || "";
+        releaseBinaryB64 = "";
+        byId("releaseBinaryFile").value = "";
+        renderReleases();
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("createRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const body = await api("POST", "/v1/releases", currentReleaseDraftBody(version));
+        setOk("created/updated release draft: " + version);
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+        await loadReleases();
+        await loadDevices();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("overwriteRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const body = await api("PUT", "/v1/releases/" + encodeURIComponent(version), currentReleaseDraftBody(version));
+        setOk("overwritten release draft: " + version);
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+        await loadReleases();
+        await loadDevices();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("approveRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const body = await api("POST", "/v1/releases/" + encodeURIComponent(version) + ":approve");
+        setOk("approved release: " + version);
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+        await loadReleases();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("deleteRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const body = await api("DELETE", "/v1/releases/" + encodeURIComponent(version));
+        setOk("deleted release: " + version);
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+        if (selectedRelease === version) {
+          selectedRelease = "";
+          byId("selectedRelease").textContent = "-";
+        }
+        await loadReleases();
+        await loadDevices();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
+    byId("assignRelease").onclick = async () => {
+      try {
+        setErr(""); setOk("");
+        const version = currentReleaseVersion();
+        const device = selectedDevice || "";
+        if (!device) throw new Error("select device first");
+        const applyAt = byId("releaseApplyAt").value.trim();
+        const payload = { version };
+        if (applyAt) payload.apply_at = applyAt;
+        const body = await api("POST", "/v1/devices/" + encodeURIComponent(device) + ":assign-release", payload);
+        setOk("assigned release " + version + " to " + device + (applyAt ? (" apply_at=" + applyAt) : ""));
+        byId("releaseActionOut").textContent = JSON.stringify(body, null, 2);
+        await loadDevices();
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
     byId("rfExportBaseMap").onclick = () => {
       try {
         setErr(""); setOk("");
@@ -1087,7 +1295,32 @@ const adminDevicesPageHTML = `<!doctype html>
       } catch (e) { setErr(String(e.message || e)); }
     };
 
+    byId("releaseBinaryFile").onchange = async (ev) => {
+      try {
+        setErr(""); setOk("");
+        const f = (ev.target.files || [])[0];
+        if (!f) {
+          releaseBinaryB64 = "";
+          releaseSHA = "";
+          byId("releaseSHA").value = "";
+          return;
+        }
+        const buf = await f.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const digest = await crypto.subtle.digest("SHA-256", bytes);
+        releaseSHA = toHex(new Uint8Array(digest));
+        releaseBinaryB64 = bytesToBase64(bytes);
+        byId("releaseSHA").value = releaseSHA;
+        setOk("release binary loaded: " + f.name + " (" + bytes.length + " bytes)");
+      } catch (e) { setErr(String(e.message || e)); }
+    };
+
     byId("version").oninput = () => renderRuleFilesDiff();
+    byId("releaseVersion").oninput = () => {
+      selectedRelease = byId("releaseVersion").value.trim();
+      byId("selectedRelease").textContent = selectedRelease || "-";
+      renderReleases();
+    };
     byId("rfActiveBase").oninput = () => {
       saveActiveBaseForSelection();
       renderRuleFilesDiff();
