@@ -5,6 +5,13 @@
 - English: `README.md`
 - 日本語: `README.ja.md`
 
+## mamotama とは？
+
+**mamotama** は日本語の **「護りたまえ」 (mamoritamae)** に由来し、
+「どうか護ってください」や「護りを与えてください」という意味を持ちます。
+
+この名前には、edge / IoT インフラを守るというプロジェクトの目的を込めています。
+
 ## 概要
 
 `mamotama-center` は単一バイナリで動作し、主に次を提供します。
@@ -115,3 +122,7 @@ make config-check CONFIG=./center.config.json
 
 - 詳細な API 仕様・例は `README.md`（英語版）を参照してください。
 - ストレージは現状ファイルベースです（将来 DB 移行を想定した設計）。
+
+## ライセンス
+
+Apache License 2.0。詳細は [LICENSE](LICENSE) を参照してください。
