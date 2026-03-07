@@ -2036,6 +2036,19 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 	if got := uiRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "text/html") {
 		t.Fatalf("unexpected admin logs ui content-type: %s", got)
 	}
+	if !strings.Contains(uiRes.Body.String(), "/admin/logs/assets/admin_logs.js") {
+		t.Fatalf("unexpected admin logs ui body: missing logs assets reference")
+	}
+
+	logAssetReq := httptest.NewRequest(http.MethodGet, "/admin/logs/assets/admin_logs.js", nil)
+	logAssetRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(logAssetRes, logAssetReq)
+	if logAssetRes.Code != http.StatusOK {
+		t.Fatalf("admin logs ui asset failed: %d body=%s", logAssetRes.Code, logAssetRes.Body.String())
+	}
+	if got := logAssetRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "javascript") {
+		t.Fatalf("unexpected admin logs ui asset content-type: %s", got)
+	}
 
 	deviceUIReq := httptest.NewRequest(http.MethodGet, "/admin/devices", nil)
 	deviceUIRes := httptest.NewRecorder()
@@ -2045,6 +2058,19 @@ func TestAdminLogsListAndDownload(t *testing.T) {
 	}
 	if got := deviceUIRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "text/html") {
 		t.Fatalf("unexpected admin devices ui content-type: %s", got)
+	}
+	if !strings.Contains(deviceUIRes.Body.String(), "/admin/devices/assets/admin_devices.js") {
+		t.Fatalf("unexpected admin devices ui body: missing devices assets reference")
+	}
+
+	deviceAssetReq := httptest.NewRequest(http.MethodGet, "/admin/devices/assets/admin_devices.js", nil)
+	deviceAssetRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(deviceAssetRes, deviceAssetReq)
+	if deviceAssetRes.Code != http.StatusOK {
+		t.Fatalf("admin devices ui asset failed: %d body=%s", deviceAssetRes.Code, deviceAssetRes.Body.String())
+	}
+	if got := deviceAssetRes.Header().Get("Content-Type"); !strings.Contains(strings.ToLower(got), "javascript") {
+		t.Fatalf("unexpected admin devices ui asset content-type: %s", got)
 	}
 }
 

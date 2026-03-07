@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mamotama-center logs</title>
+  <link rel="stylesheet" href="/admin/logs/assets/admin_logs.css">
+</head>
+<body>
+  <div class="wrap">
+    <h1>Center Admin Logs</h1>
+    <div class="grid">
+      <div class="panel">
+        <div class="row">
+          <div style="flex:1; min-width:260px;">
+            <label>Admin API Key</label>
+            <input id="apiKey" type="password" placeholder="X-API-Key">
+          </div>
+          <button id="saveKey" class="secondary">Save Key</button>
+        </div>
+        <div class="row">
+          <div>
+            <label>Device Prefix</label>
+            <input id="prefix" placeholder="device-">
+          </div>
+          <button id="loadDevices">Load Devices</button>
+        </div>
+        <div class="row">
+          <label style="margin:0;">Device</label>
+          <select id="deviceSelect" style="min-width:220px;"></select>
+        </div>
+        <div class="row">
+          <div><label>From (RFC3339)</label><input id="from" placeholder="2026-03-06T00:00:00Z"></div>
+          <div><label>To (RFC3339)</label><input id="to" placeholder="2026-03-07T00:00:00Z"></div>
+          <div><label>Kind</label><select id="kind"><option value="">all</option><option>access</option><option>security</option><option>system</option></select></div>
+          <div><label>Level</label><select id="level"><option value="">all</option><option>info</option><option>warn</option><option>error</option></select></div>
+        </div>
+        <div class="row">
+          <button id="loadSummary">Load Summary</button>
+          <button id="loadLogs">Load Logs</button>
+          <button id="downloadLogs" class="secondary">Download NDJSON</button>
+          <select id="policyState"><option value="desired">desired</option><option value="current">current</option></select>
+          <button id="downloadRule" class="secondary">Download Rule</button>
+        </div>
+        <div id="err" class="error"></div>
+        <div class="muted">API: <code>/v1/admin/logs/devices</code>, <code>/v1/admin/logs/summary</code>, <code>/v1/admin/logs</code>, <code>/v1/admin/logs/download</code>, <code>/v1/devices/{device_id}:download-policy</code></div>
+      </div>
+      <div class="panel">
+        <label>Summary</label>
+        <textarea id="summaryOut" readonly></textarea>
+      </div>
+      <div class="panel">
+        <label>Logs</label>
+        <textarea id="logsOut" readonly></textarea>
+      </div>
+    </div>
+  </div>
+  <script src="/admin/logs/assets/admin_logs.js"></script>
+</body>
+</html>
