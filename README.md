@@ -336,3 +336,7 @@ Notes:
 
 `mamotama-edge`  
 https://github.com/vril-dev/mamotama-edge
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).
