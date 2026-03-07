@@ -119,6 +119,15 @@ make db-check CONFIG=./center.config.json
 make db-migrate CONFIG=./center.config.json
 ```
 
+ストア移行（双方向）:
+
+```bash
+make db-file-to-sqlite CONFIG=./center.config.json
+make db-sqlite-to-file CONFIG=./center.config.json
+# 出力先の上書きを許可
+make db-file-to-sqlite CONFIG=./center.config.json OVERWRITE=1
+```
+
 ## 署名方式（要点）
 
 `enroll` / `heartbeat` / `policy pull/ack` / `logs push` はすべて署名付きです。

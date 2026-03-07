@@ -32,12 +32,18 @@ func main() {
 	var dbInitOnly bool
 	var dbCheckOnly bool
 	var dbMigrateOnly bool
+	var migrateFileToSQLite bool
+	var migrateSQLiteToFile bool
+	var migrateOverwrite bool
 	flag.StringVar(&configPath, "config", "center.config.json", "Path to center configuration file")
 	flag.BoolVar(&showVersion, "version", false, "Show version information and exit")
 	flag.BoolVar(&validateConfigOnly, "validate-config", false, "Validate configuration file and exit")
 	flag.BoolVar(&dbInitOnly, "db-init", false, "Initialize SQLite schema and exit")
 	flag.BoolVar(&dbCheckOnly, "db-check", false, "Check SQLite schema and exit")
 	flag.BoolVar(&dbMigrateOnly, "db-migrate", false, "Migrate SQLite schema and exit")
+	flag.BoolVar(&migrateFileToSQLite, "migrate-file-to-sqlite", false, "Migrate file store data into SQLite store and exit")
+	flag.BoolVar(&migrateSQLiteToFile, "migrate-sqlite-to-file", false, "Migrate SQLite store data into file store and exit")
+	flag.BoolVar(&migrateOverwrite, "migrate-overwrite", false, "Allow destination overwrite for migration commands")
 	flag.Parse()
 
 	if showVersion {
@@ -50,7 +56,7 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	if dbInitOnly || dbCheckOnly || dbMigrateOnly {
+	if dbInitOnly || dbCheckOnly || dbMigrateOnly || migrateFileToSQLite || migrateSQLiteToFile {
 		modeCount := 0
 		if dbInitOnly {
 			modeCount++
@@ -61,8 +67,14 @@ func main() {
 		if dbMigrateOnly {
 			modeCount++
 		}
+		if migrateFileToSQLite {
+			modeCount++
+		}
+		if migrateSQLiteToFile {
+			modeCount++
+		}
 		if modeCount > 1 {
-			log.Fatalf("db flags are mutually exclusive: choose one of -db-init, -db-check, -db-migrate")
+			log.Fatalf("db/migration flags are mutually exclusive")
 		}
 		dbPath := cfg.Storage.SQLiteDBPath()
 		switch {
@@ -81,6 +93,20 @@ func main() {
 				log.Fatalf("migrate sqlite store: %v", err)
 			}
 			fmt.Printf("sqlite migrated: %s\n", dbPath)
+		case migrateFileToSQLite:
+			result, err := center.MigrateFileStoreToSQLite(cfg.Storage.Path, dbPath, migrateOverwrite)
+			if err != nil {
+				log.Fatalf("migrate file->sqlite: %v", err)
+			}
+			fmt.Printf("file->sqlite migrated: file=%s sqlite=%s devices=%d policies=%d releases=%d\n",
+				cfg.Storage.Path, dbPath, result.Devices, result.Policies, result.Releases)
+		case migrateSQLiteToFile:
+			result, err := center.MigrateSQLiteStoreToFile(dbPath, cfg.Storage.Path, migrateOverwrite)
+			if err != nil {
+				log.Fatalf("migrate sqlite->file: %v", err)
+			}
+			fmt.Printf("sqlite->file migrated: sqlite=%s file=%s devices=%d policies=%d releases=%d\n",
+				dbPath, cfg.Storage.Path, result.Devices, result.Policies, result.Releases)
 		}
 		return
 	}

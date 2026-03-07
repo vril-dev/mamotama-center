@@ -188,6 +188,15 @@ make db-check CONFIG=./center.config.json
 make db-migrate CONFIG=./center.config.json
 ```
 
+Store migration tooling (bidirectional):
+
+```bash
+make db-file-to-sqlite CONFIG=./center.config.json
+make db-sqlite-to-file CONFIG=./center.config.json
+# allow overwrite on destination
+make db-file-to-sqlite CONFIG=./center.config.json OVERWRITE=1
+```
+
 ## Request Signature Format
 
 Both `POST /v1/enroll` and `POST /v1/heartbeat` use:
@@ -347,6 +356,8 @@ Notes:
 - `make db-init`
 - `make db-check`
 - `make db-migrate`
+- `make db-file-to-sqlite`
+- `make db-sqlite-to-file`
 - `make device-policy-download`
 - `make check`
 - integration flow test:

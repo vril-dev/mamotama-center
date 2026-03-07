@@ -10,7 +10,12 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS ?= -X main.version=$(VERSION) -X main.commit=$(GIT_COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-.PHONY: help fmt test test-race vet check build run config-check db-init db-check db-migrate device-revoke device-policy-download clean
+.PHONY: help fmt test test-race vet check build run config-check db-init db-check db-migrate db-file-to-sqlite db-sqlite-to-file device-revoke device-policy-download clean
+
+MIGRATE_OVERWRITE_FLAG :=
+ifneq ($(filter 1 true yes,$(OVERWRITE)),)
+MIGRATE_OVERWRITE_FLAG := -migrate-overwrite
+endif
 
 help:
 	@echo "Targets:"
@@ -20,6 +25,9 @@ help:
 	@echo "  make db-init       Initialize SQLite schema and exit"
 	@echo "  make db-check      Verify SQLite schema and exit"
 	@echo "  make db-migrate    Apply SQLite migration(s) and exit"
+	@echo "  make db-file-to-sqlite  Migrate file store -> sqlite store"
+	@echo "  make db-sqlite-to-file  Migrate sqlite store -> file store"
+	@echo "    - optional: OVERWRITE=1 to allow destination overwrite"
 	@echo "  make device-revoke Revoke active key for one device (CENTER_URL + DEVICE_ID required)"
 	@echo "    - optional: REASON='compromised'"
 	@echo "    - optional: CENTER_ADMIN_API_KEY_FILE=..."
@@ -68,6 +76,12 @@ db-check:
 
 db-migrate:
 	$(GO) run $(PKG) -config $(CONFIG) -db-migrate
+
+db-file-to-sqlite:
+	$(GO) run $(PKG) -config $(CONFIG) -migrate-file-to-sqlite $(MIGRATE_OVERWRITE_FLAG)
+
+db-sqlite-to-file:
+	$(GO) run $(PKG) -config $(CONFIG) -migrate-sqlite-to-file $(MIGRATE_OVERWRITE_FLAG)
 
 device-revoke:
 	@if [ -z "$(CENTER_URL)" ]; then \
