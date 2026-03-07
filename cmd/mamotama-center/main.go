@@ -29,9 +29,15 @@ func main() {
 	var configPath string
 	var showVersion bool
 	var validateConfigOnly bool
+	var dbInitOnly bool
+	var dbCheckOnly bool
+	var dbMigrateOnly bool
 	flag.StringVar(&configPath, "config", "center.config.json", "Path to center configuration file")
 	flag.BoolVar(&showVersion, "version", false, "Show version information and exit")
 	flag.BoolVar(&validateConfigOnly, "validate-config", false, "Validate configuration file and exit")
+	flag.BoolVar(&dbInitOnly, "db-init", false, "Initialize SQLite schema and exit")
+	flag.BoolVar(&dbCheckOnly, "db-check", false, "Check SQLite schema and exit")
+	flag.BoolVar(&dbMigrateOnly, "db-migrate", false, "Migrate SQLite schema and exit")
 	flag.Parse()
 
 	if showVersion {
@@ -42,6 +48,41 @@ func main() {
 	cfg, err := center.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
+	}
+
+	if dbInitOnly || dbCheckOnly || dbMigrateOnly {
+		modeCount := 0
+		if dbInitOnly {
+			modeCount++
+		}
+		if dbCheckOnly {
+			modeCount++
+		}
+		if dbMigrateOnly {
+			modeCount++
+		}
+		if modeCount > 1 {
+			log.Fatalf("db flags are mutually exclusive: choose one of -db-init, -db-check, -db-migrate")
+		}
+		dbPath := cfg.Storage.SQLiteDBPath()
+		switch {
+		case dbInitOnly:
+			if err := center.InitSQLiteStore(dbPath); err != nil {
+				log.Fatalf("init sqlite store: %v", err)
+			}
+			fmt.Printf("sqlite initialized: %s\n", dbPath)
+		case dbCheckOnly:
+			if err := center.CheckSQLiteStore(dbPath); err != nil {
+				log.Fatalf("check sqlite store: %v", err)
+			}
+			fmt.Printf("sqlite check ok: %s\n", dbPath)
+		case dbMigrateOnly:
+			if err := center.MigrateSQLiteStore(dbPath); err != nil {
+				log.Fatalf("migrate sqlite store: %v", err)
+			}
+			fmt.Printf("sqlite migrated: %s\n", dbPath)
+		}
+		return
 	}
 	if validateConfigOnly {
 		fmt.Printf("config is valid: %s\n", configPath)

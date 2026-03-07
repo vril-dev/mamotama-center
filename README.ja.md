@@ -95,6 +95,7 @@ cp center.config.example.json center.config.json
 - `auth.admin_read_api_keys` / `auth.admin_write_api_keys` を設定
 - 本番は `auth.require_tls=true` を維持
 - 永続化先 `storage.path` を設定
+- SQLite 管理用に `storage.sqlite_path` を設定
 
 3. ビルドと起動
 
@@ -107,6 +108,14 @@ make run CONFIG=./center.config.json
 
 ```bash
 make config-check CONFIG=./center.config.json
+```
+
+SQLite スキーマ管理:
+
+```bash
+make db-init CONFIG=./center.config.json
+make db-check CONFIG=./center.config.json
+make db-migrate CONFIG=./center.config.json
 ```
 
 ## 署名方式（要点）

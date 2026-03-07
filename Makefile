@@ -10,13 +10,16 @@ GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS ?= -X main.version=$(VERSION) -X main.commit=$(GIT_COMMIT) -X main.buildDate=$(BUILD_DATE)
 
-.PHONY: help fmt test test-race vet check build run config-check device-revoke device-policy-download clean
+.PHONY: help fmt test test-race vet check build run config-check db-init db-check db-migrate device-revoke device-policy-download clean
 
 help:
 	@echo "Targets:"
 	@echo "  make build         Build local binary"
 	@echo "  make run           Run with CONFIG=./center.config.json"
 	@echo "  make config-check  Validate center config and exit"
+	@echo "  make db-init       Initialize SQLite schema and exit"
+	@echo "  make db-check      Verify SQLite schema and exit"
+	@echo "  make db-migrate    Apply SQLite migration(s) and exit"
 	@echo "  make device-revoke Revoke active key for one device (CENTER_URL + DEVICE_ID required)"
 	@echo "    - optional: REASON='compromised'"
 	@echo "    - optional: CENTER_ADMIN_API_KEY_FILE=..."
@@ -56,6 +59,15 @@ run:
 
 config-check:
 	$(GO) run $(PKG) -config $(CONFIG) -validate-config
+
+db-init:
+	$(GO) run $(PKG) -config $(CONFIG) -db-init
+
+db-check:
+	$(GO) run $(PKG) -config $(CONFIG) -db-check
+
+db-migrate:
+	$(GO) run $(PKG) -config $(CONFIG) -db-migrate
 
 device-revoke:
 	@if [ -z "$(CENTER_URL)" ]; then \

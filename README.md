@@ -158,6 +158,7 @@ cp center.config.example.json center.config.json
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
 - set `storage.path` (persistent file path)
+- set `storage.sqlite_path` (SQLite path for DB init/check/migrate tooling)
 - optional: set `storage.log_retention` (default `720h` = 30 days, `0` disables age-based pruning)
 - optional: set `storage.log_max_bytes` (default `5368709120` = 5 GiB, `0` disables size-based pruning)
 - optional: tune `heartbeat.max_clock_skew`
@@ -176,6 +177,14 @@ Validation only:
 
 ```bash
 make config-check CONFIG=./center.config.json
+```
+
+SQLite schema tooling:
+
+```bash
+make db-init CONFIG=./center.config.json
+make db-check CONFIG=./center.config.json
+make db-migrate CONFIG=./center.config.json
 ```
 
 ## Request Signature Format
@@ -334,6 +343,9 @@ Notes:
 - `make build`
 - `make run`
 - `make config-check`
+- `make db-init`
+- `make db-check`
+- `make db-migrate`
 - `make device-policy-download`
 - `make check`
 - integration flow test:

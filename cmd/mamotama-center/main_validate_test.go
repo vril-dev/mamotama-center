@@ -12,7 +12,7 @@ func TestValidateConfigFlag(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "center.config.json")
 	cfg := `{
   "auth":{"enrollment_license_keys":["test-license-key-1234"]},
-  "storage":{"path":"./center-data/devices.json"}
+  "storage":{"path":"./center-data/devices.json","sqlite_path":"./center-data/center.db"}
 }`
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -25,6 +25,36 @@ func TestValidateConfigFlag(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "config is valid: "+cfgPath) {
 		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestDBInitAndCheckFlags(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "center.config.json")
+	dbPath := filepath.Join(t.TempDir(), "center-data", "center.db")
+	cfg := `{
+  "auth":{"enrollment_license_keys":["test-license-key-1234"]},
+  "storage":{"path":"./center-data/devices.json","sqlite_path":"` + dbPath + `"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cmdInit := exec.Command("go", "run", ".", "-config", cfgPath, "-db-init")
+	outInit, err := cmdInit.CombinedOutput()
+	if err != nil {
+		t.Fatalf("db init command failed: %v\noutput=%s", err, outInit)
+	}
+	if !strings.Contains(string(outInit), "sqlite initialized: "+dbPath) {
+		t.Fatalf("unexpected db-init output: %s", outInit)
+	}
+
+	cmdCheck := exec.Command("go", "run", ".", "-config", cfgPath, "-db-check")
+	outCheck, err := cmdCheck.CombinedOutput()
+	if err != nil {
+		t.Fatalf("db check command failed: %v\noutput=%s", err, outCheck)
+	}
+	if !strings.Contains(string(outCheck), "sqlite check ok: "+dbPath) {
+		t.Fatalf("unexpected db-check output: %s", outCheck)
 	}
 }
 

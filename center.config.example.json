@@ -24,6 +24,7 @@
   },
   "storage": {
     "path": "./center-data/devices.json",
+    "sqlite_path": "./center-data/center.db",
     "log_retention": "720h",
     "log_max_bytes": 5368709120
   },
