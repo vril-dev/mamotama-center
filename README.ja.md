@@ -57,6 +57,16 @@
   - filter: `all`, `changed`, `missing_current`, `missing_compare`
   - 検索 / ソート
 
+## 管理 UI スクリーンショット
+
+`/admin/devices`:
+
+![center admin devices](docs/images/center_admin_devices.png)
+
+`/admin/logs`:
+
+![center admin logs](docs/images/center_admin_logs.png)
+
 ## クイックスタート
 
 1. 設定をコピー
