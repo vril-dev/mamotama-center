@@ -5,13 +5,6 @@
 - English: `README.md`
 - 日本語: `README.ja.md`
 
-## mamotama とは？
-
-**mamotama** は日本語の **「護りたまえ」 (mamoritamae)** に由来し、
-「どうか護ってください」や「護りを与えてください」という意味を持ちます。
-
-この名前には、edge / IoT インフラを守るというプロジェクトの目的を込めています。
-
 ## 概要
 
 `mamotama-center` は単一バイナリで動作し、主に次を提供します。
@@ -95,6 +88,8 @@ cp center.config.example.json center.config.json
 - `auth.admin_read_api_keys` / `auth.admin_write_api_keys` を設定
 - 本番は `auth.require_tls=true` を維持
 - 永続化先 `storage.path` を設定
+- `storage.backend`（`file` または `sqlite`。既定 `file`）を設定
+- SQLite 管理用に `storage.sqlite_path` を設定
 
 3. ビルドと起動
 
@@ -107,6 +102,23 @@ make run CONFIG=./center.config.json
 
 ```bash
 make config-check CONFIG=./center.config.json
+```
+
+SQLite スキーマ管理:
+
+```bash
+make db-init CONFIG=./center.config.json
+make db-check CONFIG=./center.config.json
+make db-migrate CONFIG=./center.config.json
+```
+
+ストア移行（双方向）:
+
+```bash
+make db-file-to-sqlite CONFIG=./center.config.json
+make db-sqlite-to-file CONFIG=./center.config.json
+# 出力先の上書きを許可
+make db-file-to-sqlite CONFIG=./center.config.json OVERWRITE=1
 ```
 
 ## 署名方式（要点）
@@ -122,6 +134,13 @@ make config-check CONFIG=./center.config.json
 
 - 詳細な API 仕様・例は `README.md`（英語版）を参照してください。
 - ストレージは現状ファイルベースです（将来 DB 移行を想定した設計）。
+
+## mamotama とは？
+
+**mamotama** は日本語の **「護りたまえ」 (mamoritamae)** に由来し、
+「どうか護ってください」や「護りを与えてください」という意味を持ちます。
+
+この名前には、edge / IoT インフラを守るというプロジェクトの目的を込めています。
 
 ## ライセンス
 

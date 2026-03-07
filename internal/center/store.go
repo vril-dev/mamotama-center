@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -174,7 +175,10 @@ type storedDevices struct {
 
 type deviceStore struct {
 	mu           sync.RWMutex
+	backend      string
 	path         string
+	sqlitePath   string
+	db           *sql.DB
 	logRetention time.Duration
 	logMaxBytes  int64
 	devices      map[string]DeviceRecord
@@ -184,13 +188,31 @@ type deviceStore struct {
 
 func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 	path := strings.TrimSpace(cfg.Path)
+	backend := cfg.BackendName()
 	s := &deviceStore{
+		backend:      backend,
 		path:         path,
+		sqlitePath:   cfg.SQLiteDBPath(),
 		logRetention: cfg.LogRetention.Duration,
 		logMaxBytes:  cfg.LogMaxBytes,
 		devices:      map[string]DeviceRecord{},
 		policies:     map[string]PolicyRecord{},
 		releases:     map[string]ReleaseRecord{},
+	}
+	if backend == storageBackendSQLite {
+		if err := InitSQLiteStore(s.sqlitePath); err != nil {
+			return nil, fmt.Errorf("init sqlite store: %w", err)
+		}
+		db, err := openSQLite(s.sqlitePath, true)
+		if err != nil {
+			return nil, fmt.Errorf("open sqlite store: %w", err)
+		}
+		s.db = db
+		if err := s.loadSQLiteIntoMemory(); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("load sqlite store: %w", err)
+		}
+		return s, nil
 	}
 
 	b, err := os.ReadFile(path)
@@ -812,6 +834,22 @@ func (s *deviceStore) findByFingerprint(fingerprint string) (DeviceRecord, bool)
 func (s *deviceStore) upsertEnroll(rec DeviceRecord) (DeviceRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	fingerprint := strings.ToLower(strings.TrimSpace(rec.PublicKeyFingerprintSHA256))
+	if fingerprint != "" {
+		for deviceID, existing := range s.devices {
+			if deviceID == rec.DeviceID {
+				continue
+			}
+			if existing.PublicKeyFingerprintSHA256 == fingerprint {
+				return DeviceRecord{}, errStoreConflict
+			}
+			for _, revoked := range existing.RevokedKeys {
+				if revoked.PublicKeyFingerprintSHA256 == fingerprint {
+					return DeviceRecord{}, errStoreConflict
+				}
+			}
+		}
+	}
 	prev, ok := s.devices[rec.DeviceID]
 	if ok {
 		rec.FirstSeenAt = prev.FirstSeenAt
@@ -1669,6 +1707,9 @@ func defaultKeyIDFromFingerprint(fingerprint string) string {
 }
 
 func (s *deviceStore) saveLocked() error {
+	if s.backend == storageBackendSQLite {
+		return s.saveSQLiteSnapshotLocked()
+	}
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir store dir: %w", err)
