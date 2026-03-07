@@ -5,13 +5,6 @@ Control plane for mamotama-edge.
 - English: `README.md`
 - 日本語: `README.ja.md`
 
-## What Is mamotama?
-
-**mamotama** is inspired by the Japanese phrase **「護りたまえ」 (mamoritamae)**,
-which means *"please protect"* or *"grant protection"*.
-
-The name reflects the project's purpose: protecting edge and IoT infrastructure.
-
 `mamotama-center` is a single-binary service for:
 - edge device enrollment
 - heartbeat verification
@@ -367,6 +360,13 @@ Notes:
 
 `mamotama-edge`  
 https://github.com/vril-dev/mamotama-edge
+
+## What Is mamotama?
+
+**mamotama** is inspired by the Japanese phrase **「護りたまえ」 (mamoritamae)**,
+which means *"please protect"* or *"grant protection"*.
+
+The name reflects the project's purpose: protecting edge and IoT infrastructure.
 
 ## License
 
