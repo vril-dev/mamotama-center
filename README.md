@@ -98,6 +98,16 @@ Control plane for mamotama-edge.
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
 
+## Admin UI Screenshots
+
+`/admin/devices`:
+
+![center admin devices](docs/images/center_admin_devices.png)
+
+`/admin/logs`:
+
+![center admin logs](docs/images/center_admin_logs.png)
+
 ## Quick Start
 
 1. Copy config:
