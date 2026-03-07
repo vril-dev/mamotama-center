@@ -36,10 +36,17 @@ type AuthConfig struct {
 }
 
 type StorageConfig struct {
+	Backend      string   `json:"backend,omitempty"`
 	Path         string   `json:"path"`
+	SQLitePath   string   `json:"sqlite_path,omitempty"`
 	LogRetention Duration `json:"log_retention"`
 	LogMaxBytes  int64    `json:"log_max_bytes"`
 }
+
+const (
+	storageBackendFile   = "file"
+	storageBackendSQLite = "sqlite"
+)
 
 type HeartbeatConfig struct {
 	MaxClockSkew               Duration `json:"max_clock_skew"`
@@ -69,7 +76,9 @@ func defaultConfig() Config {
 			MaxNoncesPerDevice:    256,
 		},
 		Storage: StorageConfig{
+			Backend:      storageBackendFile,
 			Path:         "./center-data/devices.json",
+			SQLitePath:   "./center-data/center.db",
 			LogRetention: Duration{Duration: 30 * 24 * time.Hour},
 			LogMaxBytes:  5 * 1024 * 1024 * 1024,
 		},
@@ -106,7 +115,9 @@ func LoadConfig(path string) (Config, error) {
 
 func normalize(cfg *Config) {
 	cfg.Server.ListenAddress = strings.TrimSpace(cfg.Server.ListenAddress)
+	cfg.Storage.Backend = normalizeStorageBackend(cfg.Storage.Backend)
 	cfg.Storage.Path = strings.TrimSpace(cfg.Storage.Path)
+	cfg.Storage.SQLitePath = strings.TrimSpace(cfg.Storage.SQLitePath)
 	for i, key := range cfg.Auth.EnrollmentLicenseKeys {
 		cfg.Auth.EnrollmentLicenseKeys[i] = strings.TrimSpace(key)
 	}
@@ -127,6 +138,12 @@ func validate(cfg Config) error {
 	}
 	if cfg.Storage.Path == "" {
 		return fmt.Errorf("storage.path is required")
+	}
+	if cfg.Storage.Backend != storageBackendFile && cfg.Storage.Backend != storageBackendSQLite {
+		return fmt.Errorf("storage.backend must be one of: file, sqlite")
+	}
+	if cfg.Storage.SQLitePath == "" {
+		return fmt.Errorf("storage.sqlite_path is required")
 	}
 	if cfg.Storage.LogRetention.Duration < 0 {
 		return fmt.Errorf("storage.log_retention must be >= 0")
@@ -188,4 +205,20 @@ func validate(cfg Config) error {
 		return fmt.Errorf("heartbeat.stale_after must be greater than heartbeat.expected_interval")
 	}
 	return nil
+}
+
+func (s StorageConfig) SQLiteDBPath() string {
+	return strings.TrimSpace(s.SQLitePath)
+}
+
+func (s StorageConfig) BackendName() string {
+	return normalizeStorageBackend(s.Backend)
+}
+
+func normalizeStorageBackend(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return storageBackendFile
+	}
+	return raw
 }

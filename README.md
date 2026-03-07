@@ -5,13 +5,6 @@ Control plane for mamotama-edge.
 - English: `README.md`
 - 日本語: `README.ja.md`
 
-## What Is mamotama?
-
-**mamotama** is inspired by the Japanese phrase **「護りたまえ」 (mamoritamae)**,
-which means *"please protect"* or *"grant protection"*.
-
-The name reflects the project's purpose: protecting edge and IoT infrastructure.
-
 `mamotama-center` is a single-binary service for:
 - edge device enrollment
 - heartbeat verification
@@ -158,6 +151,8 @@ cp center.config.example.json center.config.json
 - if TLS terminates at a trusted proxy/LB, set `auth.trust_forwarded_proto=true`
 - tune replay controls: `auth.nonce_ttl`, `auth.max_nonces_per_device`
 - set `storage.path` (persistent file path)
+- set `storage.backend` (`file` or `sqlite`, default `file`)
+- set `storage.sqlite_path` (SQLite path for DB init/check/migrate tooling)
 - optional: set `storage.log_retention` (default `720h` = 30 days, `0` disables age-based pruning)
 - optional: set `storage.log_max_bytes` (default `5368709120` = 5 GiB, `0` disables size-based pruning)
 - optional: tune `heartbeat.max_clock_skew`
@@ -176,6 +171,23 @@ Validation only:
 
 ```bash
 make config-check CONFIG=./center.config.json
+```
+
+SQLite schema tooling:
+
+```bash
+make db-init CONFIG=./center.config.json
+make db-check CONFIG=./center.config.json
+make db-migrate CONFIG=./center.config.json
+```
+
+Store migration tooling (bidirectional):
+
+```bash
+make db-file-to-sqlite CONFIG=./center.config.json
+make db-sqlite-to-file CONFIG=./center.config.json
+# allow overwrite on destination
+make db-file-to-sqlite CONFIG=./center.config.json OVERWRITE=1
 ```
 
 ## Request Signature Format
@@ -334,6 +346,11 @@ Notes:
 - `make build`
 - `make run`
 - `make config-check`
+- `make db-init`
+- `make db-check`
+- `make db-migrate`
+- `make db-file-to-sqlite`
+- `make db-sqlite-to-file`
 - `make device-policy-download`
 - `make check`
 - integration flow test:
@@ -343,6 +360,13 @@ Notes:
 
 `mamotama-edge`  
 https://github.com/vril-dev/mamotama-edge
+
+## What Is mamotama?
+
+**mamotama** is inspired by the Japanese phrase **「護りたまえ」 (mamoritamae)**,
+which means *"please protect"* or *"grant protection"*.
+
+The name reflects the project's purpose: protecting edge and IoT infrastructure.
 
 ## License
 
