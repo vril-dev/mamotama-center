@@ -2,8 +2,7 @@
 
 `mamotama-edge` 向けのコントロールプレーンです。
 
-- English: `README.md`
-- 日本語: `README.ja.md`
+[English](README.md) | [日本語](README.ja.md)
 
 ## 概要
 
@@ -63,6 +62,7 @@
   - 端末キーごとの差分をテーブル表示
   - filter: `all`, `changed`, `missing_current`, `missing_compare`
   - 検索 / ソート
+- edge からアップロードされたログをもとに、upstream backend health（`healthy`/`unhealthy`、endpoint、連続失敗回数、最終遷移時刻）を端末一覧で可視化
 
 ## 管理 UI スクリーンショット
 

@@ -376,7 +376,17 @@
         if (d.device_id === selectedDevice) tr.className = "selected";
         const policyPair = (d.desired_policy_version || "-") + " / " + (d.current_policy_version || "-");
         const releasePair = (d.desired_release_version || "-") + " / " + (d.current_release_version || "-");
-        tr.innerHTML = "<td>"+(d.device_id||"")+"</td><td>"+(d.status||"")+"</td><td>"+policyPair+"</td><td>"+releasePair+"</td><td>"+(d.desired_release_not_before_at||"-")+"</td><td>"+String(!!d.flagged)+"</td>";
+        const upstreamStatus = String(d.upstream_health_status || "").trim();
+        const upstreamEndpoint = String(d.upstream_health_endpoint || "").trim();
+        const upstreamFailures = Number(d.upstream_health_consecutive_failures || 0);
+        const upstreamError = String(d.upstream_health_last_error || "").trim();
+        let upstreamSummary = upstreamStatus || "-";
+        if (upstreamStatus) {
+          if (upstreamEndpoint) upstreamSummary += " @" + upstreamEndpoint;
+          if (upstreamStatus === "unhealthy" && upstreamFailures > 0) upstreamSummary += " failures=" + upstreamFailures;
+          if (upstreamStatus === "unhealthy" && upstreamError) upstreamSummary += " err=" + upstreamError;
+        }
+        tr.innerHTML = "<td>"+(d.device_id||"")+"</td><td>"+(d.status||"")+"</td><td>"+policyPair+"</td><td>"+releasePair+"</td><td>"+(d.desired_release_not_before_at||"-")+"</td><td>"+upstreamSummary+"</td><td>"+(d.upstream_health_last_changed_at||"-")+"</td><td>"+String(!!d.flagged)+"</td>";
         tr.onclick = () => {
           selectedDevice = d.device_id || "";
           byId("selectedDevice").textContent = selectedDevice || "-";
