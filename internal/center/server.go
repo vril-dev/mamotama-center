@@ -1424,6 +1424,11 @@ func (s *Server) handleLogsPush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	healthSnapshot, hasHealthSnapshot, healthErr := extractLatestUpstreamHealthSnapshot(payload)
+	if healthErr != nil {
+		s.logger.Printf(`{"level":"warn","msg":"parse upstream health snapshot failed","device_id":"%s","error":"%s"}`, req.DeviceID, healthErr)
+	}
+
 	saved, outPath, err := s.store.saveLogBatch(req.DeviceID, msgTS, req.Nonce, payload, req.EntryCount, req.ContentSHA256)
 	if err != nil {
 		switch {
@@ -1436,6 +1441,14 @@ func (s *Server) handleLogsPush(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to persist log batch")
 		}
 		return
+	}
+	if hasHealthSnapshot {
+		updated, updateErr := s.store.updateUpstreamHealth(req.DeviceID, healthSnapshot, msgTS)
+		if updateErr != nil {
+			s.logger.Printf(`{"level":"warn","msg":"persist upstream health snapshot failed","device_id":"%s","error":"%s"}`, req.DeviceID, updateErr)
+		} else {
+			saved = updated
+		}
 	}
 	s.logger.Printf(`{"level":"info","msg":"log batch uploaded","device_id":"%s","entries":%d,"bytes":%d}`, req.DeviceID, req.EntryCount, len(payload))
 	writeJSON(w, http.StatusOK, map[string]any{

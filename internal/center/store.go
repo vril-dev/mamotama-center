@@ -68,47 +68,52 @@ type ReleaseRecord struct {
 }
 
 type DeviceRecord struct {
-	DeviceID                   string             `json:"device_id"`
-	KeyID                      string             `json:"key_id,omitempty"`
-	KeyVersion                 int                `json:"key_version,omitempty"`
-	PublicKeyPEMBase64         string             `json:"public_key_pem_b64"`
-	PublicKeyFingerprintSHA256 string             `json:"public_key_fingerprint_sha256"`
-	RevokedKeys                []RevokedKeyRecord `json:"revoked_keys,omitempty"`
-	FirstSeenAt                string             `json:"first_seen_at"`
-	LastSeenAt                 string             `json:"last_seen_at"`
-	EnrolledAt                 string             `json:"enrolled_at"`
-	LastEnrollMessageAt        string             `json:"last_enroll_message_at,omitempty"`
-	LastEnrollNonce            string             `json:"last_enroll_nonce,omitempty"`
-	LastEnrollIP               string             `json:"last_enroll_ip,omitempty"`
-	LastHeartbeatAt            string             `json:"last_heartbeat_at,omitempty"`
-	LastHeartbeatMessageAt     string             `json:"last_heartbeat_message_at,omitempty"`
-	LastHeartbeatNonce         string             `json:"last_heartbeat_nonce,omitempty"`
-	LastHeartbeatStatusHash    string             `json:"last_heartbeat_status_hash,omitempty"`
-	DesiredPolicyVersion       string             `json:"desired_policy_version,omitempty"`
-	DesiredPolicySHA256        string             `json:"desired_policy_sha256,omitempty"`
-	DesiredPolicyAssignedAt    string             `json:"desired_policy_assigned_at,omitempty"`
-	CurrentPolicyVersion       string             `json:"current_policy_version,omitempty"`
-	CurrentPolicySHA256        string             `json:"current_policy_sha256,omitempty"`
-	LastPolicySyncAt           string             `json:"last_policy_sync_at,omitempty"`
-	LastPolicyAckAt            string             `json:"last_policy_ack_at,omitempty"`
-	LastPolicyAckStatus        string             `json:"last_policy_ack_status,omitempty"`
-	LastPolicyAckMessage       string             `json:"last_policy_ack_message,omitempty"`
-	DesiredReleaseVersion      string             `json:"desired_release_version,omitempty"`
-	DesiredReleaseSHA256       string             `json:"desired_release_sha256,omitempty"`
-	DesiredReleaseAssignedAt   string             `json:"desired_release_assigned_at,omitempty"`
-	DesiredReleaseNotBeforeAt  string             `json:"desired_release_not_before_at,omitempty"`
-	CurrentReleaseVersion      string             `json:"current_release_version,omitempty"`
-	CurrentReleaseSHA256       string             `json:"current_release_sha256,omitempty"`
-	LastReleaseSyncAt          string             `json:"last_release_sync_at,omitempty"`
-	LastReleaseAckAt           string             `json:"last_release_ack_at,omitempty"`
-	LastReleaseAckStatus       string             `json:"last_release_ack_status,omitempty"`
-	LastReleaseAckMessage      string             `json:"last_release_ack_message,omitempty"`
-	LastLogUploadAt            string             `json:"last_log_upload_at,omitempty"`
-	LastLogUploadEntries       int                `json:"last_log_upload_entries,omitempty"`
-	LastLogUploadBytes         int64              `json:"last_log_upload_bytes,omitempty"`
-	LastLogUploadSHA256        string             `json:"last_log_upload_sha256,omitempty"`
-	RetiredAt                  string             `json:"retired_at,omitempty"`
-	RetireReason               string             `json:"retire_reason,omitempty"`
+	DeviceID                          string             `json:"device_id"`
+	KeyID                             string             `json:"key_id,omitempty"`
+	KeyVersion                        int                `json:"key_version,omitempty"`
+	PublicKeyPEMBase64                string             `json:"public_key_pem_b64"`
+	PublicKeyFingerprintSHA256        string             `json:"public_key_fingerprint_sha256"`
+	RevokedKeys                       []RevokedKeyRecord `json:"revoked_keys,omitempty"`
+	FirstSeenAt                       string             `json:"first_seen_at"`
+	LastSeenAt                        string             `json:"last_seen_at"`
+	EnrolledAt                        string             `json:"enrolled_at"`
+	LastEnrollMessageAt               string             `json:"last_enroll_message_at,omitempty"`
+	LastEnrollNonce                   string             `json:"last_enroll_nonce,omitempty"`
+	LastEnrollIP                      string             `json:"last_enroll_ip,omitempty"`
+	LastHeartbeatAt                   string             `json:"last_heartbeat_at,omitempty"`
+	LastHeartbeatMessageAt            string             `json:"last_heartbeat_message_at,omitempty"`
+	LastHeartbeatNonce                string             `json:"last_heartbeat_nonce,omitempty"`
+	LastHeartbeatStatusHash           string             `json:"last_heartbeat_status_hash,omitempty"`
+	DesiredPolicyVersion              string             `json:"desired_policy_version,omitempty"`
+	DesiredPolicySHA256               string             `json:"desired_policy_sha256,omitempty"`
+	DesiredPolicyAssignedAt           string             `json:"desired_policy_assigned_at,omitempty"`
+	CurrentPolicyVersion              string             `json:"current_policy_version,omitempty"`
+	CurrentPolicySHA256               string             `json:"current_policy_sha256,omitempty"`
+	LastPolicySyncAt                  string             `json:"last_policy_sync_at,omitempty"`
+	LastPolicyAckAt                   string             `json:"last_policy_ack_at,omitempty"`
+	LastPolicyAckStatus               string             `json:"last_policy_ack_status,omitempty"`
+	LastPolicyAckMessage              string             `json:"last_policy_ack_message,omitempty"`
+	DesiredReleaseVersion             string             `json:"desired_release_version,omitempty"`
+	DesiredReleaseSHA256              string             `json:"desired_release_sha256,omitempty"`
+	DesiredReleaseAssignedAt          string             `json:"desired_release_assigned_at,omitempty"`
+	DesiredReleaseNotBeforeAt         string             `json:"desired_release_not_before_at,omitempty"`
+	CurrentReleaseVersion             string             `json:"current_release_version,omitempty"`
+	CurrentReleaseSHA256              string             `json:"current_release_sha256,omitempty"`
+	LastReleaseSyncAt                 string             `json:"last_release_sync_at,omitempty"`
+	LastReleaseAckAt                  string             `json:"last_release_ack_at,omitempty"`
+	LastReleaseAckStatus              string             `json:"last_release_ack_status,omitempty"`
+	LastReleaseAckMessage             string             `json:"last_release_ack_message,omitempty"`
+	LastLogUploadAt                   string             `json:"last_log_upload_at,omitempty"`
+	LastLogUploadEntries              int                `json:"last_log_upload_entries,omitempty"`
+	LastLogUploadBytes                int64              `json:"last_log_upload_bytes,omitempty"`
+	LastLogUploadSHA256               string             `json:"last_log_upload_sha256,omitempty"`
+	UpstreamHealthStatus              string             `json:"upstream_health_status,omitempty"`
+	UpstreamHealthEndpoint            string             `json:"upstream_health_endpoint,omitempty"`
+	UpstreamHealthLastChangedAt       string             `json:"upstream_health_last_changed_at,omitempty"`
+	UpstreamHealthLastError           string             `json:"upstream_health_last_error,omitempty"`
+	UpstreamHealthConsecutiveFailures int                `json:"upstream_health_consecutive_failures,omitempty"`
+	RetiredAt                         string             `json:"retired_at,omitempty"`
+	RetireReason                      string             `json:"retire_reason,omitempty"`
 }
 
 type LogDeviceRecord struct {
@@ -250,6 +255,21 @@ func loadDeviceStore(cfg StorageConfig) (*deviceStore, error) {
 		rec.CurrentReleaseSHA256 = strings.ToLower(strings.TrimSpace(rec.CurrentReleaseSHA256))
 		rec.LastReleaseAckStatus = strings.TrimSpace(strings.ToLower(rec.LastReleaseAckStatus))
 		rec.LastLogUploadSHA256 = strings.ToLower(strings.TrimSpace(rec.LastLogUploadSHA256))
+		rec.UpstreamHealthStatus = normalizeUpstreamHealthStatus(rec.UpstreamHealthStatus)
+		rec.UpstreamHealthEndpoint = strings.TrimSpace(rec.UpstreamHealthEndpoint)
+		rec.UpstreamHealthLastChangedAt = normalizeStoreTimestamp(rec.UpstreamHealthLastChangedAt)
+		rec.UpstreamHealthLastError = strings.TrimSpace(rec.UpstreamHealthLastError)
+		if rec.UpstreamHealthConsecutiveFailures < 0 {
+			rec.UpstreamHealthConsecutiveFailures = 0
+		}
+		if rec.UpstreamHealthStatus == "healthy" {
+			rec.UpstreamHealthConsecutiveFailures = 0
+			rec.UpstreamHealthLastError = ""
+		}
+		if rec.UpstreamHealthStatus == "" {
+			rec.UpstreamHealthConsecutiveFailures = 0
+			rec.UpstreamHealthLastError = ""
+		}
 		if rec.KeyID == "" && rec.PublicKeyFingerprintSHA256 != "" {
 			rec.KeyID = defaultKeyIDFromFingerprint(rec.PublicKeyFingerprintSHA256)
 		}
@@ -1113,6 +1133,58 @@ func (s *deviceStore) saveLogBatch(deviceID string, messageAt time.Time, nonce s
 	return rec, outPath, nil
 }
 
+func (s *deviceStore) updateUpstreamHealth(deviceID string, snapshot upstreamHealthSnapshot, fallbackChangedAt time.Time) (DeviceRecord, error) {
+	status := normalizeUpstreamHealthStatus(snapshot.Status)
+	if status == "" {
+		return DeviceRecord{}, errStoreInvalid
+	}
+	endpoint := strings.TrimSpace(snapshot.Endpoint)
+	lastError := strings.TrimSpace(snapshot.LastError)
+	failures := snapshot.ConsecutiveFailures
+	if failures < 0 {
+		failures = 0
+	}
+	changedAt := snapshot.LastChangedAt.UTC()
+	if changedAt.IsZero() {
+		changedAt = fallbackChangedAt.UTC()
+	}
+	if changedAt.IsZero() {
+		changedAt = time.Now().UTC()
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.devices[deviceID]
+	if !ok {
+		return DeviceRecord{}, os.ErrNotExist
+	}
+	rec.UpstreamHealthStatus = status
+	if endpoint != "" {
+		rec.UpstreamHealthEndpoint = endpoint
+	}
+	rec.UpstreamHealthLastChangedAt = changedAt.Format(time.RFC3339Nano)
+	if status == "healthy" {
+		rec.UpstreamHealthConsecutiveFailures = 0
+		rec.UpstreamHealthLastError = ""
+	} else {
+		if failures <= 0 {
+			if rec.UpstreamHealthConsecutiveFailures > 0 {
+				failures = rec.UpstreamHealthConsecutiveFailures + 1
+			} else {
+				failures = 1
+			}
+		}
+		rec.UpstreamHealthConsecutiveFailures = failures
+		rec.UpstreamHealthLastError = lastError
+	}
+	s.devices[deviceID] = rec
+	if err := s.saveLocked(); err != nil {
+		return DeviceRecord{}, err
+	}
+	return rec, nil
+}
+
 func (s *deviceStore) enforceLogLimitsLocked(now time.Time) error {
 	if s.logRetention <= 0 && s.logMaxBytes <= 0 {
 		return nil
@@ -1665,6 +1737,25 @@ func parseStoreRFC3339Any(raw string) (time.Time, bool) {
 		return ts.UTC(), true
 	}
 	return time.Time{}, false
+}
+
+func normalizeStoreTimestamp(raw string) string {
+	ts, ok := parseStoreRFC3339Any(raw)
+	if !ok {
+		return ""
+	}
+	return ts.Format(time.RFC3339Nano)
+}
+
+func normalizeUpstreamHealthStatus(raw string) string {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case "healthy":
+		return "healthy"
+	case "unhealthy":
+		return "unhealthy"
+	default:
+		return ""
+	}
 }
 
 func safePathComponent(raw string) string {
