@@ -10,18 +10,26 @@ import (
 
 type Config struct {
 	Server    ServerConfig    `json:"server"`
+	Runtime   RuntimeConfig   `json:"runtime"`
 	Auth      AuthConfig      `json:"auth"`
 	Storage   StorageConfig   `json:"storage"`
 	Heartbeat HeartbeatConfig `json:"heartbeat"`
 }
 
 type ServerConfig struct {
-	ListenAddress     string   `json:"listen_address"`
-	ReadHeaderTimeout Duration `json:"read_header_timeout"`
-	ReadTimeout       Duration `json:"read_timeout"`
-	WriteTimeout      Duration `json:"write_timeout"`
-	IdleTimeout       Duration `json:"idle_timeout"`
-	ShutdownTimeout   Duration `json:"shutdown_timeout"`
+	ListenAddress         string   `json:"listen_address"`
+	ReadHeaderTimeout     Duration `json:"read_header_timeout"`
+	ReadTimeout           Duration `json:"read_timeout"`
+	WriteTimeout          Duration `json:"write_timeout"`
+	IdleTimeout           Duration `json:"idle_timeout"`
+	ShutdownTimeout       Duration `json:"shutdown_timeout"`
+	MaxHeaderBytes        int      `json:"max_header_bytes"`
+	MaxConcurrentRequests int      `json:"max_concurrent_requests"`
+}
+
+type RuntimeConfig struct {
+	GOMAXPROCS    int `json:"gomaxprocs"`
+	MemoryLimitMB int `json:"memory_limit_mb"`
 }
 
 type AuthConfig struct {
@@ -58,12 +66,18 @@ type HeartbeatConfig struct {
 func defaultConfig() Config {
 	return Config{
 		Server: ServerConfig{
-			ListenAddress:     ":18081",
-			ReadHeaderTimeout: Duration{Duration: 3 * time.Second},
-			ReadTimeout:       Duration{Duration: 10 * time.Second},
-			WriteTimeout:      Duration{Duration: 15 * time.Second},
-			IdleTimeout:       Duration{Duration: 60 * time.Second},
-			ShutdownTimeout:   Duration{Duration: 10 * time.Second},
+			ListenAddress:         ":18081",
+			ReadHeaderTimeout:     Duration{Duration: 3 * time.Second},
+			ReadTimeout:           Duration{Duration: 10 * time.Second},
+			WriteTimeout:          Duration{Duration: 15 * time.Second},
+			IdleTimeout:           Duration{Duration: 60 * time.Second},
+			ShutdownTimeout:       Duration{Duration: 10 * time.Second},
+			MaxHeaderBytes:        0,
+			MaxConcurrentRequests: 0,
+		},
+		Runtime: RuntimeConfig{
+			GOMAXPROCS:    0,
+			MemoryLimitMB: 0,
 		},
 		Auth: AuthConfig{
 			EnrollmentLicenseKeys: nil,
@@ -150,6 +164,18 @@ func validate(cfg Config) error {
 	}
 	if cfg.Storage.LogMaxBytes < 0 {
 		return fmt.Errorf("storage.log_max_bytes must be >= 0")
+	}
+	if cfg.Server.MaxHeaderBytes < 0 {
+		return fmt.Errorf("server.max_header_bytes must be >= 0")
+	}
+	if cfg.Server.MaxConcurrentRequests < 0 {
+		return fmt.Errorf("server.max_concurrent_requests must be >= 0")
+	}
+	if cfg.Runtime.GOMAXPROCS < 0 {
+		return fmt.Errorf("runtime.gomaxprocs must be >= 0")
+	}
+	if cfg.Runtime.MemoryLimitMB < 0 {
+		return fmt.Errorf("runtime.memory_limit_mb must be >= 0")
 	}
 	if len(cfg.Auth.EnrollmentLicenseKeys) == 0 {
 		return fmt.Errorf("auth.enrollment_license_keys requires at least one key")

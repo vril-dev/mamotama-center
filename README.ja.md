@@ -155,6 +155,8 @@ cp center.config.example.json center.config.json
 - `storage.sqlite_path`（DB init/check/migrate 用 SQLite パス）を設定
 - 任意で `storage.log_retention` を設定（既定 `720h` = 30日、`0` で期限削除無効）
 - 任意で `storage.log_max_bytes` を設定（既定 `5368709120` = 5 GiB、`0` で容量削除無効）
+- 任意で `server.max_header_bytes`, `server.max_concurrent_requests` を調整
+- 任意で `runtime.gomaxprocs`, `runtime.memory_limit_mb` を調整
 - 任意で `heartbeat.max_clock_skew` を調整
 - 任意で `heartbeat.expected_interval` を調整
 - 任意で `heartbeat.missed_heartbeats_for_offline` を調整
