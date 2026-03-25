@@ -140,3 +140,45 @@ func TestValidateConfigFlagInvalidStorageBackend(t *testing.T) {
 		t.Fatalf("unexpected output: %s", out)
 	}
 }
+
+func TestValidateConfigFlagInvalidServerLimits(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "center.config-invalid-server-limits.json")
+	cfg := `{
+  "server":{"max_concurrent_requests":-1},
+  "auth":{"enrollment_license_keys":["test-license-key-1234"]},
+  "storage":{"backend":"file","path":"./center-data/devices.json","sqlite_path":"./center-data/center.db"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write invalid server-limits config: %v", err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "-config", cfgPath, "-validate-config")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command failure for invalid server limit, output=%s", out)
+	}
+	if !strings.Contains(string(out), "server.max_concurrent_requests must be >= 0") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestValidateConfigFlagInvalidRuntimeLimits(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "center.config-invalid-runtime-limits.json")
+	cfg := `{
+  "runtime":{"memory_limit_mb":-1},
+  "auth":{"enrollment_license_keys":["test-license-key-1234"]},
+  "storage":{"backend":"file","path":"./center-data/devices.json","sqlite_path":"./center-data/center.db"}
+}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatalf("write invalid runtime-limits config: %v", err)
+	}
+
+	cmd := exec.Command("go", "run", ".", "-config", cfgPath, "-validate-config")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected command failure for invalid runtime limit, output=%s", out)
+	}
+	if !strings.Contains(string(out), "runtime.memory_limit_mb must be >= 0") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}

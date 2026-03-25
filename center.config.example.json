@@ -5,7 +5,13 @@
     "read_timeout": "10s",
     "write_timeout": "15s",
     "idle_timeout": "60s",
-    "shutdown_timeout": "10s"
+    "shutdown_timeout": "10s",
+    "max_header_bytes": 0,
+    "max_concurrent_requests": 0
+  },
+  "runtime": {
+    "gomaxprocs": 0,
+    "memory_limit_mb": 0
   },
   "auth": {
     "enrollment_license_keys": [
