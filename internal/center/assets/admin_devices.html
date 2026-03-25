@@ -23,21 +23,23 @@
       <div id="ok" class="ok"></div>
     </div>
 
-    <div class="grid">
+    <div class="grid summary-grid">
       <div class="panel">
         <h2>Devices</h2>
         <div class="row">
           <button id="reloadDevices">Reload Devices</button>
           <span class="muted">Selected device: <span id="selectedDevice" class="mono">-</span></span>
         </div>
-        <table id="devicesTable">
-          <thead>
-            <tr>
-              <th>device_id</th><th>status</th><th>policy(desired/current)</th><th>release(desired/current)</th><th>release apply_at</th><th>upstream health</th><th>upstream changed_at</th><th>flagged</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="devicesTable">
+            <thead>
+              <tr>
+                <th>device_id</th><th>status</th><th>policy(desired/current)</th><th>release(desired/current)</th><th>release apply_at</th><th>upstream health</th><th>upstream changed_at</th><th>flagged</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="panel">
@@ -46,14 +48,16 @@
           <button id="reloadPolicies">Reload Policies</button>
           <span class="muted">Selected policy: <span id="selectedPolicy" class="mono">-</span></span>
         </div>
-        <table id="policiesTable">
-          <thead>
-            <tr>
-              <th>version</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="policiesTable">
+            <thead>
+              <tr>
+                <th>version</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
 
       <div class="panel">
@@ -62,14 +66,16 @@
           <button id="reloadReleases">Reload Releases</button>
           <span class="muted">Selected release: <span id="selectedRelease" class="mono">-</span></span>
         </div>
-        <table id="releasesTable">
-          <thead>
-            <tr>
-              <th>version</th><th>platform</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-scroll">
+          <table id="releasesTable">
+            <thead>
+              <tr>
+                <th>version</th><th>platform</th><th>status</th><th>assigned</th><th>applied</th><th>updated_at</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
