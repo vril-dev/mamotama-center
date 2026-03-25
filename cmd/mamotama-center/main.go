@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -116,18 +117,21 @@ func main() {
 	}
 
 	logger := log.New(os.Stdout, "", 0)
+	applyRuntimeTuning(cfg, logger)
 	centerServer, err := center.NewServer(cfg, logger)
 	if err != nil {
 		log.Fatalf("build center server: %v", err)
 	}
+	handler := applyServerRequestLimit(centerServer.Handler(), cfg.Server.MaxConcurrentRequests, logger)
 
 	srv := &http.Server{
 		Addr:              cfg.Server.ListenAddress,
-		Handler:           centerServer.Handler(),
+		Handler:           handler,
 		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Duration,
 		ReadTimeout:       cfg.Server.ReadTimeout.Duration,
 		WriteTimeout:      cfg.Server.WriteTimeout.Duration,
 		IdleTimeout:       cfg.Server.IdleTimeout.Duration,
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 	}
 
 	go func() {
@@ -150,4 +154,36 @@ func main() {
 
 	time.Sleep(50 * time.Millisecond)
 	logger.Printf(`{"level":"info","msg":"center server shutdown complete"}`)
+}
+
+func applyRuntimeTuning(cfg center.Config, logger *log.Logger) {
+	if cfg.Runtime.GOMAXPROCS > 0 {
+		previous := runtime.GOMAXPROCS(cfg.Runtime.GOMAXPROCS)
+		logger.Printf(`{"level":"info","msg":"runtime gomaxprocs applied","requested":%d,"previous":%d}`, cfg.Runtime.GOMAXPROCS, previous)
+	}
+	if cfg.Runtime.MemoryLimitMB > 0 {
+		requestedBytes := int64(cfg.Runtime.MemoryLimitMB) * 1024 * 1024
+		previous := debug.SetMemoryLimit(requestedBytes)
+		logger.Printf(`{"level":"info","msg":"runtime memory limit applied","requested_mb":%d,"requested_bytes":%d,"previous_bytes":%d}`, cfg.Runtime.MemoryLimitMB, requestedBytes, previous)
+	}
+}
+
+func applyServerRequestLimit(next http.Handler, maxConcurrent int, logger *log.Logger) http.Handler {
+	if maxConcurrent <= 0 {
+		return next
+	}
+	sem := make(chan struct{}, maxConcurrent)
+	logger.Printf(`{"level":"info","msg":"server concurrency limit enabled","max_concurrent_requests":%d}`, maxConcurrent)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"server busy"}`))
+		}
+	})
 }

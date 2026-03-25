@@ -155,6 +155,8 @@ cp center.config.example.json center.config.json
 - set `storage.sqlite_path` (SQLite path for DB init/check/migrate tooling)
 - optional: set `storage.log_retention` (default `720h` = 30 days, `0` disables age-based pruning)
 - optional: set `storage.log_max_bytes` (default `5368709120` = 5 GiB, `0` disables size-based pruning)
+- optional: tune server guard values `server.max_header_bytes`, `server.max_concurrent_requests`
+- optional: tune Go runtime values `runtime.gomaxprocs`, `runtime.memory_limit_mb`
 - optional: tune `heartbeat.max_clock_skew`
 - optional: tune `heartbeat.expected_interval`
 - optional: tune `heartbeat.missed_heartbeats_for_offline`
