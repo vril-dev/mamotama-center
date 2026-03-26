@@ -131,6 +131,15 @@ Control plane for mamotama-edge.
 
 `POST /v1/reputation/pull` builds the returned blocklist from recent `kind=security` log batches. Scores are weighted by event type and get an additional bonus when the same IP is observed by multiple edge devices within the active window.
 
+Recommended operations:
+- keep recent edge `kind=security` logs flowing into `POST /v1/logs/push`; shared reputation quality depends on that source data
+- size `storage.log_retention` and `storage.log_max_bytes` so the reputation window has enough history without unbounded growth
+
+Monitoring points:
+- watch `GET /v1/admin/metrics` for device counts, log-device counts, and reputation summary gauges
+- use `GET /v1/admin/logs/summary` and `GET /v1/admin/logs` to confirm security log volume and multi-device overlap behind reputation bonuses
+- verify `POST /v1/reputation/pull` returns expected summaries when recent security logs are present
+
 ## Admin UI Screenshots
 
 `/admin/devices`:
