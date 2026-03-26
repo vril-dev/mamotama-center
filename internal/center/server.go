@@ -228,6 +228,7 @@ func (s *Server) routes() {
 		LogEntries:     s.handleAdminLogs,
 		LogSummary:     s.handleAdminLogsSummary,
 		LogDownload:    s.handleAdminLogsDownload,
+		Metrics:        s.handleAdminMetrics,
 		LogUI:          s.handleAdminLogsUI,
 		LogUIAssets:    s.handleAdminLogsUIAssets,
 		DeviceUI:       s.handleAdminDevicesUI,

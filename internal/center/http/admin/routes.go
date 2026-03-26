@@ -14,6 +14,7 @@ type Handlers struct {
 	LogEntries     http.HandlerFunc
 	LogSummary     http.HandlerFunc
 	LogDownload    http.HandlerFunc
+	Metrics        http.HandlerFunc
 	LogUI          http.HandlerFunc
 	LogUIAssets    http.HandlerFunc
 	DeviceUI       http.HandlerFunc
@@ -56,6 +57,9 @@ func Register(mux *http.ServeMux, h Handlers) {
 	}
 	if h.LogDownload != nil {
 		mux.HandleFunc("/v1/admin/logs/download", h.LogDownload)
+	}
+	if h.Metrics != nil {
+		mux.HandleFunc("/v1/admin/metrics", h.Metrics)
 	}
 	if h.LogUI != nil {
 		mux.HandleFunc("/admin/logs", h.LogUI)
