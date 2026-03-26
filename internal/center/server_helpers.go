@@ -198,6 +198,10 @@ func releaseAckBodyCanonical(req releaseAckRequest) string {
 	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + req.ReleaseVersion + "\n" + req.ReleaseSHA256 + "\n" + req.ResultStatus + "\n" + req.Message
 }
 
+func reputationPullBodyCanonical(req reputationPullRequest) string {
+	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce
+}
+
 func logsPushBodyCanonical(req logsPushRequest) string {
 	return req.DeviceID + "\n" + req.KeyID + "\n" + req.Timestamp + "\n" + req.Nonce + "\n" + strconv.Itoa(req.EntryCount) + "\n" + req.ContentSHA256 + "\n" + req.ContentEncoding
 }

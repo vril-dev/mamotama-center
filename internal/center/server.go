@@ -144,6 +144,15 @@ type releaseAckRequest struct {
 	SignatureB64   string `json:"signature_b64"`
 }
 
+type reputationPullRequest struct {
+	DeviceID     string `json:"device_id"`
+	KeyID        string `json:"key_id"`
+	Timestamp    string `json:"timestamp"`
+	Nonce        string `json:"nonce"`
+	BodyHash     string `json:"body_hash"`
+	SignatureB64 string `json:"signature_b64"`
+}
+
 type logsPushRequest struct {
 	DeviceID        string `json:"device_id"`
 	KeyID           string `json:"key_id"`
@@ -198,13 +207,14 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("/healthz", s.handleHealthz)
 	edgeroutes.Register(s.mux, edgeroutes.Handlers{
-		Enroll:      s.handleEnroll,
-		Heartbeat:   s.handleHeartbeat,
-		PolicyPull:  s.handlePolicyPull,
-		PolicyAck:   s.handlePolicyAck,
-		ReleasePull: s.handleReleasePull,
-		ReleaseAck:  s.handleReleaseAck,
-		LogsPush:    s.handleLogsPush,
+		Enroll:         s.handleEnroll,
+		Heartbeat:      s.handleHeartbeat,
+		PolicyPull:     s.handlePolicyPull,
+		PolicyAck:      s.handlePolicyAck,
+		ReleasePull:    s.handleReleasePull,
+		ReleaseAck:     s.handleReleaseAck,
+		ReputationPull: s.handleReputationPull,
+		LogsPush:       s.handleLogsPush,
 	})
 	adminroutes.Register(s.mux, adminroutes.Handlers{
 		Policies:       s.handlePolicies,
