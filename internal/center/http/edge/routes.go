@@ -3,13 +3,14 @@ package edge
 import "net/http"
 
 type Handlers struct {
-	Enroll      http.HandlerFunc
-	Heartbeat   http.HandlerFunc
-	PolicyPull  http.HandlerFunc
-	PolicyAck   http.HandlerFunc
-	ReleasePull http.HandlerFunc
-	ReleaseAck  http.HandlerFunc
-	LogsPush    http.HandlerFunc
+	Enroll         http.HandlerFunc
+	Heartbeat      http.HandlerFunc
+	PolicyPull     http.HandlerFunc
+	PolicyAck      http.HandlerFunc
+	ReleasePull    http.HandlerFunc
+	ReleaseAck     http.HandlerFunc
+	ReputationPull http.HandlerFunc
+	LogsPush       http.HandlerFunc
 }
 
 func Register(mux *http.ServeMux, h Handlers) {
@@ -33,6 +34,9 @@ func Register(mux *http.ServeMux, h Handlers) {
 	}
 	if h.ReleaseAck != nil {
 		mux.HandleFunc("/v1/release/ack", h.ReleaseAck)
+	}
+	if h.ReputationPull != nil {
+		mux.HandleFunc("/v1/reputation/pull", h.ReputationPull)
 	}
 	if h.LogsPush != nil {
 		mux.HandleFunc("/v1/logs/push", h.LogsPush)
