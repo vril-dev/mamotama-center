@@ -25,11 +25,18 @@ type ReputationFeedSummary struct {
 	ScannedEntries int64 `json:"scanned_entries"`
 	CandidateIPs   int   `json:"candidate_ips"`
 	BlockedIPs     int   `json:"blocked_ips"`
+	MultiDeviceIPs int   `json:"multi_device_ips,omitempty"`
 }
 
 type scoredAddr struct {
-	addr  netip.Addr
-	score int
+	addr        netip.Addr
+	score       int
+	deviceCount int
+}
+
+type reputationAggregate struct {
+	rawScore int
+	devices  map[string]struct{}
 }
 
 func (s *deviceStore) buildReputationFeed(now time.Time, window time.Duration, threshold int, maxItems int) (ReputationFeed, error) {
@@ -54,7 +61,7 @@ func (s *deviceStore) buildReputationFeed(now time.Time, window time.Duration, t
 
 	cutoff := now.UTC().Add(-window)
 	logsRoot := filepath.Join(filepath.Dir(storePath), "logs")
-	scores := make(map[netip.Addr]int, 1024)
+	aggregates := make(map[netip.Addr]*reputationAggregate, 1024)
 	var scanned int64
 
 	for _, deviceID := range deviceIDs {
@@ -78,21 +85,34 @@ func (s *deviceStore) buildReputationFeed(now time.Time, window time.Duration, t
 		}
 		sort.Strings(files)
 		for _, filePath := range files {
-			if err := accumulateReputationFile(filePath, cutoff, scores, &scanned); err != nil {
+			if err := accumulateReputationFile(filePath, deviceID, cutoff, aggregates, &scanned); err != nil {
 				return ReputationFeed{}, err
 			}
 		}
 	}
 
-	candidates := make([]scoredAddr, 0, len(scores))
-	for addr, score := range scores {
+	candidates := make([]scoredAddr, 0, len(aggregates))
+	multiDeviceIPs := 0
+	for addr, aggregate := range aggregates {
+		deviceCount := len(aggregate.devices)
+		if deviceCount > 1 {
+			multiDeviceIPs++
+		}
+		score := reputationEffectiveScore(aggregate.rawScore, deviceCount)
 		if score >= threshold {
-			candidates = append(candidates, scoredAddr{addr: addr, score: score})
+			candidates = append(candidates, scoredAddr{
+				addr:        addr,
+				score:       score,
+				deviceCount: deviceCount,
+			})
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		if candidates[i].score == candidates[j].score {
-			return candidates[i].addr.String() < candidates[j].addr.String()
+			if candidates[i].deviceCount == candidates[j].deviceCount {
+				return candidates[i].addr.String() < candidates[j].addr.String()
+			}
+			return candidates[i].deviceCount > candidates[j].deviceCount
 		}
 		return candidates[i].score > candidates[j].score
 	})
@@ -111,13 +131,14 @@ func (s *deviceStore) buildReputationFeed(now time.Time, window time.Duration, t
 		Blocklist:     blocklist,
 		Summary: ReputationFeedSummary{
 			ScannedEntries: scanned,
-			CandidateIPs:   len(scores),
+			CandidateIPs:   len(aggregates),
 			BlockedIPs:     len(blocklist),
+			MultiDeviceIPs: multiDeviceIPs,
 		},
 	}, nil
 }
 
-func accumulateReputationFile(filePath string, cutoff time.Time, scores map[netip.Addr]int, scanned *int64) error {
+func accumulateReputationFile(filePath, deviceID string, cutoff time.Time, aggregates map[netip.Addr]*reputationAggregate, scanned *int64) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open log batch: %w", err)
@@ -175,12 +196,35 @@ func accumulateReputationFile(filePath string, cutoff time.Time, scores map[neti
 		if weight <= 0 {
 			continue
 		}
-		scores[addr] += weight
+		aggregate := aggregates[addr]
+		if aggregate == nil {
+			aggregate = &reputationAggregate{devices: make(map[string]struct{}, 2)}
+			aggregates[addr] = aggregate
+		}
+		aggregate.rawScore += weight
+		if deviceID != "" {
+			aggregate.devices[deviceID] = struct{}{}
+		}
 	}
 	if err := sc.Err(); err != nil {
 		return fmt.Errorf("scan log batch: %w", err)
 	}
 	return nil
+}
+
+func reputationEffectiveScore(rawScore, deviceCount int) int {
+	return rawScore + reputationDeviceBonus(deviceCount)
+}
+
+func reputationDeviceBonus(deviceCount int) int {
+	if deviceCount <= 1 {
+		return 0
+	}
+	bonus := (deviceCount - 1) * 4
+	if bonus > 12 {
+		return 12
+	}
+	return bonus
 }
 
 func reputationWeight(event, action string, status int) int {

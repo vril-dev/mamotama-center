@@ -84,6 +84,8 @@
   - 署名付き edge リクエストで、release 適用結果 `applied|failed` を報告
 - `POST /v1/logs/push`
   - 署名付き edge リクエストで、gzip 圧縮 NDJSON ログバッチをアップロード
+- `POST /v1/reputation/pull`
+  - 署名付き edge リクエストで、直近 security ログから生成した shared reputation feed を取得
 - `POST /v1/devices/{device_id}:revoke`
   - ヘッダー `X-API-Key` 必須
   - 端末のアクティブ鍵を失効（再 enroll まで heartbeat 拒否）
@@ -108,6 +110,9 @@
 - `GET /v1/admin/logs/download`
   - ヘッダー `X-API-Key` 必須
   - フィルタ済みログを NDJSON でダウンロード（任意 `gzip=1`）
+- `GET /v1/admin/metrics`
+  - ヘッダー `X-API-Key` 必須
+  - devices / policies / releases / log devices / reputation summary を Prometheus 形式で出力
 - `GET /admin/logs`
   - TLS 前提の最小管理ページ（ログ端末一覧、集計、検索、ダウンロード）
 - `GET /admin/devices`
@@ -123,6 +128,8 @@
   - edge ログ由来の upstream backend health（healthy/unhealthy、endpoint、失敗回数、最終遷移）を可視化
 - `GET /healthz`
 - 原子的書き込みによる file-backed レジストリ（`storage.path`）
+
+`POST /v1/reputation/pull` が返す blocklist は、直近 `kind=security` ログの重み付きスコアを元に生成します。同一 IP が複数 edge で観測された場合は追加ボーナスが入り、fleet 共有の精度を高めます。
 
 ## 管理 UI スクリーンショット
 

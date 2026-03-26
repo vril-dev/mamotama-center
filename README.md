@@ -84,6 +84,8 @@ Control plane for mamotama-edge.
   - signed edge request to report release apply result `applied|failed`
 - `POST /v1/logs/push`
   - signed edge request to upload gzip-compressed ndjson log batch
+- `POST /v1/reputation/pull`
+  - signed edge request to fetch shared reputation feed built from recent security logs
 - `POST /v1/devices/{device_id}:revoke`
   - header `X-API-Key` required
   - revokes active key for the device (heartbeat is rejected until re-enroll)
@@ -108,6 +110,9 @@ Control plane for mamotama-edge.
 - `GET /v1/admin/logs/download`
   - header `X-API-Key` required
   - downloads filtered logs as NDJSON (`gzip=1` optional)
+- `GET /v1/admin/metrics`
+  - header `X-API-Key` required
+  - exports Prometheus-style gauges for devices, policies, releases, log devices, and reputation summary
 - `GET /admin/logs`
   - minimal TLS-only admin page for log device list, summary, query, and download
 - `GET /admin/devices`
@@ -123,6 +128,8 @@ Control plane for mamotama-edge.
   - visualizes upstream backend health (healthy/unhealthy, endpoint, failure count, last transition) from uploaded edge logs
 - `GET /healthz`
 - file-backed registry (`storage.path`) with atomic write
+
+`POST /v1/reputation/pull` builds the returned blocklist from recent `kind=security` log batches. Scores are weighted by event type and get an additional bonus when the same IP is observed by multiple edge devices within the active window.
 
 ## Admin UI Screenshots
 
