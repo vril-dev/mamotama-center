@@ -131,6 +131,15 @@
 
 `POST /v1/reputation/pull` が返す blocklist は、直近 `kind=security` ログの重み付きスコアを元に生成します。同一 IP が複数 edge で観測された場合は追加ボーナスが入り、fleet 共有の精度を高めます。
 
+推奨運用:
+- shared reputation の精度は edge から `POST /v1/logs/push` へ届く直近 `kind=security` ログに依存します
+- reputation 窓の元データを十分に残しつつ肥大化を避けるため、`storage.log_retention` と `storage.log_max_bytes` を調整してください
+
+監視ポイント:
+- `GET /v1/admin/metrics` で device 数、log device 数、reputation summary gauge を確認する
+- `GET /v1/admin/logs/summary` と `GET /v1/admin/logs` で security ログ量と複数 edge 重複観測の傾向を確認する
+- 直近 security ログがある状態で `POST /v1/reputation/pull` の summary が期待どおり返ることを確認する
+
 ## 管理 UI スクリーンショット
 
 `/admin/devices`:
