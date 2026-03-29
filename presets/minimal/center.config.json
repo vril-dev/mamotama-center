@@ -1,0 +1,44 @@
+{
+  "server": {
+    "listen_address": ":18081",
+    "read_header_timeout": "3s",
+    "read_timeout": "10s",
+    "write_timeout": "15s",
+    "idle_timeout": "60s",
+    "shutdown_timeout": "10s",
+    "max_header_bytes": 0,
+    "max_concurrent_requests": 0
+  },
+  "runtime": {
+    "gomaxprocs": 0,
+    "memory_limit_mb": 0
+  },
+  "auth": {
+    "enrollment_license_keys": [
+      "replace-with-strong-license-key-001"
+    ],
+    "admin_read_api_keys": [
+      "replace-with-strong-admin-read-api-key-001"
+    ],
+    "admin_write_api_keys": [
+      "replace-with-strong-admin-write-api-key-001"
+    ],
+    "require_tls": true,
+    "trust_forwarded_proto": false,
+    "nonce_ttl": "10m",
+    "max_nonces_per_device": 256
+  },
+  "storage": {
+    "backend": "file",
+    "path": "./center-data/devices.json",
+    "sqlite_path": "./center-data/center.db",
+    "log_retention": "720h",
+    "log_max_bytes": 5368709120
+  },
+  "heartbeat": {
+    "max_clock_skew": "5m",
+    "expected_interval": "1m",
+    "missed_heartbeats_for_offline": 3,
+    "stale_after": "720h"
+  }
+}

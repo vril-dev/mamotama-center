@@ -9,8 +9,11 @@ VERSION ?= dev
 GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS ?= -X main.version=$(VERSION) -X main.commit=$(GIT_COMMIT) -X main.buildDate=$(BUILD_DATE)
+PRESET ?= minimal
+PRESET_DIR := presets/$(PRESET)
+PRESET_OVERWRITE ?= 0
 
-.PHONY: help fmt test test-race vet check build run config-check db-init db-check db-migrate db-file-to-sqlite db-sqlite-to-file device-revoke device-policy-download clean
+.PHONY: help fmt test test-race vet check build run config-check db-init db-check db-migrate db-file-to-sqlite db-sqlite-to-file device-revoke device-policy-download preset-list preset-apply preset-check clean
 
 MIGRATE_OVERWRITE_FLAG :=
 ifneq ($(filter 1 true yes,$(OVERWRITE)),)
@@ -37,6 +40,11 @@ help:
 	@echo "    - optional: POLICY_FORMAT=raw|json (default raw)"
 	@echo "    - optional: OUT=<output_file>"
 	@echo "    - optional: CENTER_ADMIN_API_KEY_FILE=..."
+	@echo "  make preset-list    List available config presets"
+	@echo "  make preset-apply   Copy preset config into ./center.config.json"
+	@echo "    - optional: PRESET=$(PRESET) PRESET_OVERWRITE=1"
+	@echo "  make preset-check   Validate preset config without modifying local files"
+	@echo "    - optional: PRESET=$(PRESET)"
 	@echo "  make test          Run tests"
 	@echo "  make test-race     Run tests with race detector"
 	@echo "  make fmt           Format Go code"
@@ -107,6 +115,36 @@ device-policy-download:
 	CENTER_ADMIN_API_KEY="$(CENTER_ADMIN_API_KEY)" CENTER_ADMIN_API_KEY_FILE="$(CENTER_ADMIN_API_KEY_FILE)" \
 	POLICY_FORMAT="$(POLICY_FORMAT)" \
 		bash ./scripts/center_policy_download.sh "$(CENTER_URL)" "$(DEVICE_ID)" "$(POLICY_STATE)" "$(OUT)"
+
+preset-list:
+	@find presets -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
+
+preset-apply:
+	@set -euo pipefail; \
+	preset_dir="$(PRESET_DIR)"; \
+	src="$$preset_dir/center.config.json"; \
+	dst="./center.config.json"; \
+	if [[ ! -f "$$src" ]]; then \
+		echo "[preset-apply][ERROR] missing $$src" >&2; \
+		exit 1; \
+	fi; \
+	if [[ -f "$$dst" && "$(PRESET_OVERWRITE)" != "1" ]]; then \
+		echo "[preset-apply] $$dst already exists (set PRESET_OVERWRITE=1 to replace)"; \
+		exit 0; \
+	fi; \
+	cp "$$src" "$$dst"; \
+	echo "[preset-apply] applied $(PRESET) -> $$dst"
+
+preset-check:
+	@set -euo pipefail; \
+	preset_dir="$(PRESET_DIR)"; \
+	src="$$preset_dir/center.config.json"; \
+	if [[ ! -f "$$src" ]]; then \
+		echo "[preset-check][ERROR] missing $$src" >&2; \
+		exit 1; \
+	fi; \
+	$(GO) run $(PKG) -config "$$src" -validate-config; \
+	echo "[preset-check] $(PRESET) ok"
 
 clean:
 	rm -rf $(BIN_DIR)

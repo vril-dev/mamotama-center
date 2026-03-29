@@ -152,6 +152,15 @@ Monitoring points:
 
 ## Quick Start
 
+Fast path with the prepared preset:
+
+```bash
+make preset-apply PRESET=minimal
+make preset-check PRESET=minimal
+```
+
+Then replace the enrollment/admin API keys and storage paths in `center.config.json`.
+
 1. Copy config:
 
 ```bash
