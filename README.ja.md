@@ -152,6 +152,15 @@
 
 ## クイックスタート
 
+事前設定済みの preset から始める最短手順:
+
+```bash
+make preset-apply PRESET=minimal
+make preset-check PRESET=minimal
+```
+
+その後、`center.config.json` の enrollment/admin API key と storage path を実値に差し替えます。
+
 1. 設定ファイルをコピー
 
 ```bash
